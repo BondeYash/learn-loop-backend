@@ -1,0 +1,76 @@
+import ApiResponse from "../utils/ApiResponse.js";
+import asyncHandler from "../utils/asyncHandler.js";
+import ApiError from "../utils/ApiError.js";
+import mongoose from "mongoose";
+import Course from "../models/Course.js";
+import Enrollment from "../models/Enrollment.js";
+import VideoAsset from "../models/VideoAsset.js";
+import { requireCourseAccess } from "../services/courseAccess.js";
+import Module from "../models/Module.js";
+import Lesson from "../models/Lesson.js";
+import { courseCurriculum, deleteCourseWithContent, ensureCategory, requireCourseOwner, uploadCourseThumbnail } from "../services/courseService.js";
+
+const allowedFields = ["title", "description", "category", "price", "level", "language", "requirements", "learningOutcomes"];
+const pickCourseFields = (body) => Object.fromEntries(allowedFields.filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
+
+export const listCourses = asyncHandler(async (req, res) => {
+  let filter = req.user.role === "admin" ? {} : { instructor: req.user._id };
+  if (req.user.role === "student") {
+    const assignments = await Enrollment.find({ student: req.user._id, assignedBy: { $exists: true } }).select("course");
+    filter = { isPublished: true, _id: { $in: assignments.map((a) => a.course) } };
+  }
+  const courses = await Course.find(filter).populate("instructor", "name avatar").populate("category", "name slug").sort("-publishedAt");
+  return new ApiResponse(res, 200, "Courses retrieved", { courses });
+});
+export const getCourse = asyncHandler(async (req, res) => {
+  const identifiers = [{ slug: req.params.id }];
+  if (mongoose.isValidObjectId(req.params.id)) identifiers.unshift({ _id: req.params.id });
+  const course = await Course.findOne({ $or: identifiers }).populate("instructor", "name avatar bio").populate("category", "name slug");
+  if (!course) throw new ApiError(404, "Course not found");
+  await requireCourseAccess(course._id, req.user);
+  return new ApiResponse(res, 200, "Course retrieved", { course, modules: await courseCurriculum(course._id) });
+});
+export const myCourses = asyncHandler(async (req, res) => {
+  const courses = await Course.find(req.user.role === "admin" ? {} : { instructor: req.user._id }).populate("category", "name slug").sort("-updatedAt");
+  return new ApiResponse(res, 200, "Instructor courses retrieved", { courses });
+});
+export const adminCourses = asyncHandler(async (req, res) => {
+  const courses = await Course.find().populate("instructor", "name email").populate("category", "name slug").sort("-updatedAt");
+  return new ApiResponse(res, 200, "All courses retrieved", { courses });
+});
+export const getMyCourse = asyncHandler(async (req, res) => {
+  const course = await requireCourseOwner(req.params.id, req.user);
+  await course.populate("category", "name slug");
+  return new ApiResponse(res, 200, "Instructor course retrieved", { course, modules: await courseCurriculum(course._id) });
+});
+export const createCourse = asyncHandler(async (req, res) => {
+  await ensureCategory(req.body.category);
+  const course = await Course.create({ ...pickCourseFields(req.body), instructor: req.user._id });
+  return new ApiResponse(res, 201, "Course created as a draft", { course });
+});
+export const updateCourse = asyncHandler(async (req, res) => {
+  const course = await requireCourseOwner(req.params.id, req.user);
+  const changes = pickCourseFields(req.body);
+  if (changes.category) await ensureCategory(changes.category);
+  Object.assign(course, changes); await course.save();
+  return new ApiResponse(res, 200, "Course updated", { course });
+});
+export const deleteCourse = asyncHandler(async (req, res) => { const course = await requireCourseOwner(req.params.id, req.user); await deleteCourseWithContent(course); return new ApiResponse(res, 200, "Course deleted", {}); });
+export const setPublished = asyncHandler(async (req, res) => {
+  const course = await requireCourseOwner(req.params.id, req.user);
+  if (req.body.published) {
+    const lessons = await Lesson.find({ course: course._id }).populate("video", "status");
+    if (!lessons.length || lessons.some((lesson) => lesson.contentType === "video" && lesson.video?.status !== "ready")) throw new ApiError(409, "Add lessons and wait until every video is ready before publishing");
+  }
+  course.isPublished = req.body.published;
+  course.publishedAt = req.body.published ? new Date() : undefined;
+  await course.save();
+  return new ApiResponse(res, 200, course.isPublished ? "Course published" : "Course unpublished", { course });
+});
+export const uploadThumbnail = asyncHandler(async (req, res) => { if (!req.file) throw new ApiError(400, "A thumbnail image is required"); const course = await requireCourseOwner(req.params.id, req.user); course.thumbnail = await uploadCourseThumbnail(req.file.buffer); await course.save(); return new ApiResponse(res, 200, "Thumbnail uploaded", { course }); });
+export const addModule = asyncHandler(async (req, res) => { const course = await requireCourseOwner(req.params.id, req.user); const last = await Module.findOne({ course: course._id }).sort("-order"); const count = last ? last.order + 1 : 0; const module = await Module.create({ course: course._id, title: req.body.title, order: req.body.order ?? count }); return new ApiResponse(res, 201, "Module added", { module }); });
+export const updateModule = asyncHandler(async (req, res) => { const module = await Module.findById(req.params.moduleId); if (!module || module.course.toString() !== req.params.id) throw new ApiError(404, "Module not found"); await requireCourseOwner(req.params.id, req.user); if (req.body.title !== undefined) module.title = req.body.title; if (req.body.order !== undefined) module.order = req.body.order; await module.save(); return new ApiResponse(res, 200, "Module updated", { module }); });
+export const deleteModule = asyncHandler(async (req, res) => { const module = await Module.findById(req.params.moduleId); if (!module || module.course.toString() !== req.params.id) throw new ApiError(404, "Module not found"); await requireCourseOwner(req.params.id, req.user); const lessons = await Lesson.find({ module: module._id }).select("_id"); await VideoAsset.updateMany({ lesson: { $in: lessons.map((l) => l._id) } }, { status: "cancelled" }); await Lesson.deleteMany({ module: module._id }); await module.deleteOne(); return new ApiResponse(res, 200, "Module and its lessons deleted", {}); });
+export const addLesson = asyncHandler(async (req, res) => { const module = await Module.findById(req.params.moduleId); if (!module || module.course.toString() !== req.params.id) throw new ApiError(404, "Module not found"); await requireCourseOwner(req.params.id, req.user); const last = await Lesson.findOne({ module: module._id }).sort("-order"); const count = last ? last.order + 1 : 0; const lesson = await Lesson.create({ title: req.body.title, contentType: req.body.contentType || "video", content: req.body.content || "", course: module.course, module: module._id, order: req.body.order ?? count }); return new ApiResponse(res, 201, "Lesson added", { lesson }); });
+export const updateLesson = asyncHandler(async (req, res) => { const lesson = await Lesson.findById(req.params.lessonId); if (!lesson || lesson.course.toString() !== req.params.id) throw new ApiError(404, "Lesson not found"); await requireCourseOwner(req.params.id, req.user); const fields = ["title", "contentType", "content", "duration", "order", "isPreview"]; fields.forEach((field) => { if (req.body[field] !== undefined) lesson[field] = req.body[field]; }); await lesson.save(); return new ApiResponse(res, 200, "Lesson updated", { lesson }); });
+export const deleteLesson = asyncHandler(async (req, res) => { const lesson = await Lesson.findById(req.params.lessonId); if (!lesson || lesson.course.toString() !== req.params.id) throw new ApiError(404, "Lesson not found"); await requireCourseOwner(req.params.id, req.user); await VideoAsset.updateMany({ lesson: lesson._id }, { status: "cancelled" }); await lesson.deleteOne(); return new ApiResponse(res, 200, "Lesson deleted", {}); });

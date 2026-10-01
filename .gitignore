@@ -1,0 +1,26 @@
+# Local credentials and configuration
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Dependencies, generated output and local media
+node_modules/
+dist/
+build/
+coverage/
+storage/
+*.log
+*.mp4
+*.webm
+*.mov
+
+# Local editor and OS state
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

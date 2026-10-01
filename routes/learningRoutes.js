@@ -1,0 +1,11 @@
+import { Router } from "express";
+import { param } from "express-validator";
+import { protect, authorize } from "../middleware/auth.js";
+import { validate } from "../validators/authValidators.js";
+import { myEnrollments, completeLesson, courseProgress } from "../controllers/learningController.js";
+const r = Router();
+const id = [param("id").isMongoId(), validate];
+r.get("/enrollments/me", protect, authorize("student"), myEnrollments);
+r.post("/lessons/:id/complete", protect, authorize("student"), id, completeLesson);
+r.get("/courses/:id/progress", protect, authorize("student"), id, courseProgress);
+export default r;
