@@ -64,8 +64,9 @@ test("Real MongoDB + HTTP + FFmpeg integration", { timeout: 120_000 }, async (t)
     return { status: response.status, json, bytes, headers: response.headers, cookie: response.headers.get("set-cookie")?.split(";")[0] };
   };
   const register = async (email, role) => {
-    const response = await call("/auth/register", { method: "POST", body: { email, role, name: role, password: fixturePassword } });
-    assert.equal(response.status, 201, JSON.stringify(response.json));
+    if (role === "instructor") await User.create({ email, role, name: role, password: fixturePassword });
+    const response = await call(role === "instructor" ? "/auth/login" : "/auth/register", { method: "POST", body: { email, role, name: role, password: fixturePassword } });
+    assert.equal(response.status, role === "instructor" ? 200 : 201, JSON.stringify(response.json));
     assert.match(response.headers.get("set-cookie"), /HttpOnly/);
     assert.equal(response.json.data.token, undefined);
     return { cookie: response.cookie, user: response.json.data.user };

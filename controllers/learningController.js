@@ -7,7 +7,7 @@ import Progress from "../models/Progress.js";
 import { currentProgress, withCurrentCompletion } from "../services/currentProgress.js";
 import { requireCourseAccess } from "../services/courseAccess.js";
 export const myEnrollments = asyncHandler(async (req, res) => {
-  const enrollments = await Enrollment.find({ student: req.user._id, assignedBy: { $exists: true } }).populate({ path: "course", match: { isPublished: true }, populate: [{ path: "instructor", select: "name" }, { path: "category", select: "name" }] });
+  const enrollments = await Enrollment.find({ student: req.user._id, assignedBy: { $exists: true } }).populate({ path: "course", match: { isPublished: true, archivedAt: null }, populate: [{ path: "instructor", select: "name" }, { path: "category", select: "name" }] });
   const visible = enrollments.filter((item) => item.course).map((item) => item.toObject());
   const progress = await currentProgress(visible);
   return new ApiResponse(res, 200, "Assigned courses retrieved", { enrollments: visible.map((item) => withCurrentCompletion(item, progress.get(`${item.student}:${item.course._id}`))) });

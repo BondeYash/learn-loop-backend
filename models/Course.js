@@ -16,6 +16,8 @@ const courseSchema = new mongoose.Schema({
   learningOutcomes: [{ type: String, trim: true, maxlength: 300 }],
   isPublished: { type: Boolean, default: false, index: true },
   publishedAt: Date,
+  archivedAt: { type: Date, default: null, index: true },
+  archivedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   averageRating: { type: Number, default: 0, min: 0, max: 5 },
   ratingCount: { type: Number, default: 0, min: 0 },
 }, { timestamps: true });

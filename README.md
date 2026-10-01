@@ -1,5 +1,11 @@
 # LessonLoop backend
 
+## Admin and course management release
+
+Public signup creates students only. Administrators provision instructors with expiring temporary passwords and mandatory password change, review users/courses/videos/activity, pause or restore account access, and transfer course ownership. Course deletion is recoverable archive; restore returns a draft with lessons, media, assignments and progress preserved. Existing accounts are not automatically changed.
+
+The first admin is created only through the protected interactive `npm run bootstrap:admin` command run by the operator. Read [setup, role matrix, rollout and rollback precautions](docs/admin-rollout.md) before deploying. No production credentials are supplied in this repository. See the [prioritized readiness backlog](docs/production-readiness.md) for the remaining work beyond this release.
+
 Frontend: [BondeYash/learn-loop-frontend](https://github.com/BondeYash/learn-loop-frontend).
 
 LessonLoop is a video-learning application for instructors and assigned students. This is the independent API repository split from the original LMS-platform project.
@@ -26,7 +32,7 @@ Startup checks MongoDB and R2, and creates the General category if missing. `/ap
 
 ## Course flow
 
-1. Register as an instructor or student. Public signup cannot create administrators.
+1. Register as a student, or sign in with an instructor account created by an administrator. First-time instructors must change their temporary password.
 2. Create a course draft, add a module and a video lesson.
 3. Select a precompressed H.264/AAC MP4, up to 2 GiB and four hours. Convert WebM/MOV externally first. Wait for **Ready to play** and preview it.
 4. Publish when all video lessons are ready. Assign registered student email addresses in **Assigned students**.
@@ -50,7 +56,7 @@ Successful confirmation attempts to delete only its temporary `incoming/` object
 
 Revoking assignment, unpublishing or logging out blocks new playback tickets. An already issued URL is a bearer credential usable until expiry, and downloaded/buffered bytes cannot be revoked. Do not log/share signed URLs. This is private access control, not DRM. URLs are held in component memory, not browser storage.
 
-Opaque seven-day sessions use HttpOnly, SameSite=Lax cookies scoped to `/api`, with Secure enabled in production. MongoDB stores only token hashes. Logout revokes the current session; password reset revokes all account sessions. The client handles restoration, expiry, cross-tab account changes and stale responses. SMTP is required for password-reset delivery. Email verification, instructor invitations/approval and MFA are not implemented.
+Opaque seven-day sessions use HttpOnly, SameSite=Lax cookies scoped to `/api`, with Secure enabled in production. MongoDB stores only token hashes. Logout revokes the current session; password reset revokes all account sessions. The client handles restoration, expiry, cross-tab account changes and stale responses. SMTP is required for password-reset delivery. Admin-controlled instructor provisioning is implemented; email verification, email invitations and MFA remain follow-up work.
 
 ## Existing videos
 
@@ -60,6 +66,6 @@ Existing ready R2 video records and keys remain usable by the signed player. The
 
 In this repository: `npm test`, `npm audit`. The complete suite requires a disposable local MongoDB on port 27018 and FFmpeg/FFprobe for legacy regression tests. It creates a random `lms_test_*` database and temporary files, then removes only those fixtures. It does not load `.env` or use Atlas/R2 credentials. `node --test tests/direct.test.js` checks only the new flow, using real local MongoDB/HTTP with mocked object storage, without FFmpeg. `TEST_MONGO_PORT` overrides the local test port.
 
-The automated suite has 25 passing tests. The new storage tests distinguish SDK mocks from the real MongoDB/HTTP flow. Existing R2 samples remain playable. With the local CORS rule applied, a real instructor browser uploaded a retained 1,314,164-byte synthetic MP4 directly to R2; completion verified it, conditionally copied it and removed the incoming object without local staging. The course was published/assigned and its student player completed playback, sought, restored completion after reload and renewed its signed URL. Local CORS preflights pass for the two exact origins and deny an unlisted origin. No production/load test or every-device guarantee is claimed. See [deployment guidance](docs/deployment.md) for the same-origin Vercel/Render setup. No production deployment or concurrent-viewer load test has been performed. Captions, adaptive bitrate, quizzes, payments and certificates remain outside scope.
+The automated suite has 40 passing tests, including admin provisioning, credential/session invalidation, ownership transfer, course CRUD, archive/restore preservation and publication races. The new storage tests distinguish SDK mocks from the real MongoDB/HTTP flow. Existing R2 samples remain playable. With the local CORS rule applied, a real instructor browser uploaded a retained 1,314,164-byte synthetic MP4 directly to R2; completion verified it, conditionally copied it and removed the incoming object without local staging. The course was published/assigned and its student player completed playback, sought, restored completion after reload and renewed its signed URL. Local CORS preflights pass for the two exact origins and deny an unlisted origin. No production/load test or every-device guarantee is claimed. See [deployment guidance](docs/deployment.md) for the same-origin Cloudflare/Render setup. Public frontend/API deployment health has been checked; no hosted authenticated end-to-end or concurrent-viewer load test is claimed. Captions, adaptive bitrate, quizzes, payments and certificates remain outside scope.
 
 Live evidence and limits: [local verification record](docs/verification.md).

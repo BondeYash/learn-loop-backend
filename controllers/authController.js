@@ -1,6 +1,6 @@
 import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
-import { authenticateUser, publicUser, registerUser, requestPasswordReset, resetPassword } from "../services/authService.js";
+import { authenticateUser, changePassword, publicUser, registerUser, requestPasswordReset, resetPassword } from "../services/authService.js";
 import { createSession, clearSessionCookie, hashToken, SESSION_COOKIE } from "../services/sessionService.js";
 import Session from "../models/Session.js";
 const respond = async (req, res, status, message, user) => {
@@ -16,6 +16,7 @@ export const logout = asyncHandler(async (req, res) => {
   return new ApiResponse(res, 200, "Logout successful", {});
 });
 export const getMe = asyncHandler(async (req, res) => new ApiResponse(res, 200, "User profile retrieved", { user: publicUser(req.user) }));
+export const changeMyPassword = asyncHandler(async (req, res) => respond(req, res, 200, "Password changed. Other sessions have been signed out.", await changePassword(req.user._id, req.body, req.user.authVersion || 0)));
 export const forgotPassword = asyncHandler(async (req, res) => {
   await requestPasswordReset(req.body.email);
   return new ApiResponse(res, 200, "If an account exists for that email, a reset link has been sent", {});

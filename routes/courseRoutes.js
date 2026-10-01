@@ -1,4 +1,5 @@
 import { param } from "express-validator";
+import { restoreArchivedCourse } from "../controllers/courseController.js";
 import { validate } from "../validators/authValidators.js";
 import { listAssignments, assignStudents, revokeAssignment } from "../controllers/assignmentController.js";
 import { Router } from "express";
@@ -13,6 +14,7 @@ router.get("/admin/all", protect, authorize("admin"), adminCourses);
 router.post("/", protect, authorize("instructor", "admin"), createCourseValidator, createCourse);
 router.get("/:id", protect, getCourse);
 router.patch("/:id", protect, authorize("instructor", "admin"), updateCourseValidator, updateCourse); router.delete("/:id", protect, authorize("instructor", "admin"), courseIdValidator, deleteCourse);
+router.post("/:id/restore", protect, authorize("instructor", "admin"), courseIdValidator, restoreArchivedCourse);
 router.patch("/:id/publish", protect, authorize("instructor", "admin"), publishValidator, setPublished); router.post("/:id/thumbnail", protect, authorize("instructor", "admin"), courseIdValidator, thumbnailUpload, uploadThumbnail);
 router.post("/:id/modules", protect, authorize("instructor", "admin"), moduleValidator, addModule); router.patch("/:id/modules/:moduleId", protect, authorize("instructor", "admin"), moduleValidator, updateModule); router.delete("/:id/modules/:moduleId", protect, authorize("instructor", "admin"), moduleIdValidator, deleteModule);
 router.post("/:id/modules/:moduleId/lessons", protect, authorize("instructor", "admin"), lessonValidator, addLesson); router.patch("/:id/lessons/:lessonId", protect, authorize("instructor", "admin"), updateLessonValidator, updateLesson); router.delete("/:id/lessons/:lessonId", protect, authorize("instructor", "admin"), lessonIdValidator, deleteLesson);

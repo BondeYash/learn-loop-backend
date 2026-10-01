@@ -50,7 +50,7 @@ test("direct upload and signed playback authorization (real MongoDB/HTTP; object
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
   const base = `http://127.0.0.1:${server.address().port}/api`;
   const call = async (route, cookie, method = "GET", body) => { const r = await fetch(base + route, { method, headers: { ...(cookie ? { cookie } : {}), "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) }); return { status: r.status, body: await r.json(), cookie: r.headers.get("set-cookie")?.split(";")[0] }; };
-  const register = async (role, name) => { const r = await call("/auth/register", null, "POST", { name, role, email: `${name}@example.invalid`, password: crypto.randomBytes(24).toString("hex") }); assert.equal(r.status, 201); return r; };
+  const register = async (role, name) => { const password = crypto.randomBytes(24).toString("hex"); if (role === "instructor") { await User.create({ name, role, email: `${name}@example.invalid`, password }); const r = await call("/auth/login", null, "POST", { email: `${name}@example.invalid`, password }); assert.equal(r.status, 200); return r; } const r = await call("/auth/register", null, "POST", { name, role, email: `${name}@example.invalid`, password }); assert.equal(r.status, 201); return r; };
   try {
     const teacher = await register("instructor", "direct-teacher");
     const other = await register("instructor", "other-teacher");

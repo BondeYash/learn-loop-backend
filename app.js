@@ -14,6 +14,8 @@ import authRoutes from "./routes/authRoutes.js";
 import courseRoutes from "./routes/courseRoutes.js";
 import categoryRoutes from "./routes/categoryRoutes.js";
 import learningRoutes from "./routes/learningRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
+import { auditAdminMutations } from "./middleware/adminAudit.js";
 
 const app = express();
 const clientOrigin = process.env.CLIENT_URL || "http://localhost:5173";
@@ -61,6 +63,8 @@ app.get("/api/health", (req, res) => {
 });
 
 // ---- API routes ----
+app.use("/api", auditAdminMutations);
+app.use("/api/admin", adminRoutes);
 app.use("/api", videoRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/courses", courseRoutes);

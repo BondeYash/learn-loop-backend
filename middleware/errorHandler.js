@@ -11,7 +11,7 @@ const errorHandler = (err, req, res, next) => {
 
   if (!(error instanceof ApiError)) {
     let statusCode = error.statusCode || 500;
-    let message = error.message || "Internal Server Error";
+    let message = statusCode >= 500 ? "Something went wrong. Please retry or contact support." : (error.message || "Request failed");
 
     // Invalid MongoDB ObjectId
     if (error.name === "CastError") {

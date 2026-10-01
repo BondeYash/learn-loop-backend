@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "nodemon server.js",
     "start": "node server.js",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "bootstrap:admin": "node scripts/bootstrap-admin.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1144.0",
