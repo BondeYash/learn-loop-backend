@@ -15,6 +15,8 @@ const schema = new mongoose.Schema({
   stripeSessionId: { type: String, select: false },
   stripePaymentIntentId: { type: String, select: false },
   checkoutUrl: { type: String, select: false },
+  checkoutContract: { type: mongoose.Schema.Types.Mixed, select: false, immutable: true },
+  checkoutRecoveryPlan: { type: mongoose.Schema.Types.Mixed, select: false, immutable: true },
   checkoutExpiresAt: { type: Date, required: true },
   refundedMinor: { type: Number, default: 0, min: 0, validate: integer },
   paidAt: Date,

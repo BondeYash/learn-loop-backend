@@ -9,11 +9,80 @@ import { ensureCourseReady } from "./courseReadiness.js";
 import { rupeesToMinor } from "./coursePricing.js";
 import { requireStripeSettings, trustedCheckoutUrl, checkoutOrigin, assertStripeEventMode } from "./stripeClient.js";
 import { stripeMode } from "./stripeMode.js";
-import { reportPaymentFailure } from "./paymentDiagnostics.js";
+import { reportPaymentFailure, checkoutFailureMessage } from "./paymentDiagnostics.js";
 
-const SESSION_FIELDS = "+stripeSessionId +stripePaymentIntentId +checkoutUrl";
+const SESSION_FIELDS = "+stripeSessionId +stripePaymentIntentId +checkoutUrl +checkoutContract +checkoutRecoveryPlan";
 const ref = (value) => typeof value === "string" ? value : value?.id;
 export const paymentEvents = new Set(["checkout.session.completed", "checkout.session.async_payment_succeeded", "checkout.session.async_payment_failed", "checkout.session.expired", "payment_intent.succeeded", "payment_intent.payment_failed", "payment_intent.canceled", "charge.refunded", "charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed"]);
+
+function checkoutRequest(order, origin) {
+  const metadata = { orderId: String(order._id), studentId: String(order.student), courseId: String(order.course) };
+  return { mode: "payment", client_reference_id: String(order._id), metadata, payment_intent_data: { metadata }, line_items: [{ quantity: 1, price_data: { currency: "inr", unit_amount: order.amountMinor, product_data: { name: order.title } } }], success_url: `${origin.origin}/payments/${order._id}?checkout=success`, cancel_url: `${origin.origin}/payments/${order._id}?checkout=canceled` };
+}
+function newCheckoutContract(order, origin) {
+  return { version: 2, createdAt: new Date().toISOString(), key: `lessonloop-${order.testMode ? "test" : "live"}-checkout-v2-${order._id}`, request: checkoutRequest(order, origin) };
+}
+function assertCheckoutContract(order, contract, origin) {
+  if (contract?.version !== 2 || contract.key !== `lessonloop-${order.testMode ? "test" : "live"}-checkout-v2-${order._id}` || JSON.stringify(contract.request) !== JSON.stringify(checkoutRequest(order, origin))) throw new ApiError(503, "This payment attempt's saved configuration needs review. No new checkout was opened.");
+}
+
+async function legacySession(order, stripe) {
+  const matches = [], started = Date.now(); let cursor;
+  try {
+    for (let page = 0; page < 5; page++) {
+      const result = await stripe.checkout.sessions.list({ limit: 100, created: { gte: Math.floor(order.createdAt.getTime() / 1000) - 120 }, ...(cursor ? { starting_after: cursor } : {}) });
+      if (Date.now() - started > 10000 || !Array.isArray(result.data) || typeof result.has_more !== "boolean") throw new ApiError(503, "Earlier checkout reconciliation is incomplete. Retry shortly.");
+      for (const session of result.data) if (session.metadata?.orderId === String(order._id) || session.client_reference_id === String(order._id)) { assertSession(order, session); matches.push(session); }
+      if (!result.has_more) {
+        if (matches.length > 1) throw new ApiError(409, "Multiple earlier checkout sessions need review. No replacement was opened.");
+        if (!matches.length) return null;
+        const session = await stripe.checkout.sessions.retrieve(matches[0].id); assertSession(order, session); return session;
+      }
+      const last = result.data.at(-1)?.id;
+      if (!last || last === cursor) throw new ApiError(503, "Earlier checkout reconciliation is incomplete. Retry shortly.");
+      cursor = last;
+    }
+    throw new ApiError(503, "Earlier checkout reconciliation exceeds the safe scan limit. No replacement was opened.");
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    reportPaymentFailure(error, "checkout_reconcile", order.testMode ? "test" : "live");
+    throw new ApiError(503, "Earlier checkout status is unavailable. No replacement was opened.");
+  }
+}
+
+async function recoverLegacyCheckout(order, stripe, origin, PaymentOrder) {
+  let session = await legacySession(order, stripe);
+  if (session) return { order, session };
+  if (Date.now() - order.createdAt.getTime() >= 24 * 60 * 60 * 1000) throw new ApiError(409, "The earlier payment's retry window ended. Its outcome needs review; no replacement was opened.");
+  if (!order.checkoutRecoveryPlan) {
+    const request = checkoutRequest(order, origin), key = `lessonloop-${order.testMode ? "test" : "live"}-checkout-${order._id}`;
+    const plan = { current: { key, request }, original: { key, request: { ...request, payment_method_types: ["card"], expires_at: Math.floor(order.checkoutExpiresAt.getTime() / 1000) } }, replacement: newCheckoutContract(order, origin) };
+    // This compare-and-set is the only controlled addition of an immutable
+    // recovery snapshot to an older document. Concurrent callers load one plan.
+    await PaymentOrder.collection.updateOne({ _id: order._id, checkoutRecoveryPlan: { $exists: false } }, { $set: { checkoutRecoveryPlan: plan } });
+    order = await PaymentOrder.findById(order._id).select(SESSION_FIELDS);
+  }
+  if (order.checkoutContract) return { order };
+  let rejected;
+  for (const [index, candidate] of [order.checkoutRecoveryPlan.current, order.checkoutRecoveryPlan.original].entries()) {
+    try { session = await stripe.checkout.sessions.create(structuredClone(candidate.request), { idempotencyKey: candidate.key }); return { order, session }; }
+    catch (error) {
+      reportPaymentFailure(error, "checkout_create", order.testMode ? "test" : "live");
+      if (error.type === "StripeInvalidRequestError" && error.statusCode === 400 && error.headers?.["idempotent-replayed"] === "true" && !error.payment_intent) { rejected = true; break; }
+      if (index === 0 && error.type === "StripeIdempotencyError") continue;
+      throw new ApiError(502, checkoutFailureMessage(error));
+    }
+  }
+  if (!rejected) throw new ApiError(409, "Earlier payment outcome is uncertain. No replacement was opened.");
+  session = await legacySession(order, stripe);
+  if (session) return { order, session };
+  // Only a replayed, definitive 400 plus a complete empty provider scan permits
+  // a new operation version. Never rotate on timeouts, 5xx or unknown outcomes.
+  await PaymentOrder.collection.updateOne({ _id: order._id, checkoutContract: { $exists: false }, stripeSessionId: { $exists: false }, active: true, status: { $in: ["pending", "failed"] } }, { $set: { checkoutContract: order.checkoutRecoveryPlan.replacement } });
+  order = await PaymentOrder.findById(order._id).select(SESSION_FIELDS);
+  if (!order.checkoutContract) throw new ApiError(409, "The earlier payment changed. Review its status before retrying.");
+  return { order };
+}
 
 export function publicOrder(order) {
   return { id: String(order._id), courseId: String(order.course), title: order.title, amountMinor: order.amountMinor, currency: "inr", status: order.status, testMode: order.testMode, refundedMinor: order.refundedMinor, paidAt: order.paidAt, checkoutExpiresAt: order.checkoutExpiresAt };
@@ -45,7 +114,9 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   if (!order) {
     if (quotedAmountMinor !== amountMinor) throw new ApiError(409, "The course price changed. Refresh the price before paying.");
     try {
-      order = await PaymentOrder.findOneAndUpdate({ student: user._id, requestKey: hash, testMode }, { $setOnInsert: { course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", checkoutExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) } }, { upsert: true, new: true, runValidators: true }).select(SESSION_FIELDS);
+      const initial = { _id: new mongoose.Types.ObjectId(), student: user._id, course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", testMode, checkoutExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) };
+      initial.checkoutContract = newCheckoutContract(initial, origin);
+      order = await PaymentOrder.findOneAndUpdate({ student: user._id, requestKey: hash, testMode }, { $setOnInsert: initial }, { upsert: true, new: true, runValidators: true }).select(SESSION_FIELDS);
     } catch (error) {
       if (error.code !== 11000) throw error;
       order = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode }).select(SESSION_FIELDS);
@@ -56,15 +127,32 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   if (order.stripeSessionId && order.checkoutExpiresAt < new Date()) throw new ApiError(409, "This checkout attempt expired. Start a new attempt.");
   if (["paid", "refunded", "partially_refunded", "disputed", "reversed"].includes(order.status)) throw new ApiError(409, "This payment has finished or needs review. Refresh its status before starting another.");
   if (order.checkoutUrl) return { order: publicOrder(order), url: order.checkoutUrl };
-  const metadata = { orderId: String(order._id), studentId: String(order.student), courseId: String(order.course) };
   let session;
-  try {
-    // Let Stripe select eligible methods from this account's Dashboard settings.
-    // Do not force a static list or accept method overrides from the browser.
-    session = await stripe.checkout.sessions.create({ mode: "payment", client_reference_id: String(order._id), metadata, payment_intent_data: { metadata }, line_items: [{ quantity: 1, price_data: { currency: "inr", unit_amount: order.amountMinor, product_data: { name: order.title } } }], success_url: `${origin.origin}/payments/${order._id}?checkout=success`, cancel_url: `${origin.origin}/payments/${order._id}?checkout=canceled` }, { idempotencyKey: `lessonloop-${mode}-checkout-${order._id}` });
-  } catch (error) {
-    reportPaymentFailure(error, "checkout_create", mode);
-    throw new ApiError(502, "Stripe checkout is temporarily unavailable. Retry this same payment attempt.");
+  if (!order.checkoutContract) {
+    const recovered = await recoverLegacyCheckout(order, stripe, origin, PaymentOrder);
+    order = recovered.order; session = recovered.session;
+  }
+  if (!session) {
+    assertCheckoutContract(order, order.checkoutContract, origin);
+    const contractCreated = Date.parse(order.checkoutContract.createdAt);
+    if (!Number.isFinite(contractCreated) || contractCreated > Date.now()) throw new ApiError(503, "This saved payment attempt needs configuration review.");
+    if (Date.now() - contractCreated >= 24 * 60 * 60 * 1000) {
+      // Stripe may prune keys after 24 hours. Never recreate an uncertain old
+      // operation merely because its original key can now be accepted again.
+      session = await legacySession(order, stripe);
+      if (!session) throw new ApiError(409, "The earlier payment's retry window ended. Its outcome needs review; no new checkout was opened.");
+    } else {
+      try { session = await stripe.checkout.sessions.create(structuredClone(order.checkoutContract.request), { idempotencyKey: order.checkoutContract.key }); }
+      catch (error) {
+        reportPaymentFailure(error, "checkout_create", mode);
+        throw new ApiError(502, checkoutFailureMessage(error));
+      }
+    }
+  }
+  assertSession(order, session);
+  if (session.status !== "open" || session.payment_status !== "unpaid") {
+    const existing = await reconcileOrder(order._id, session.id, stripe);
+    throw new ApiError(409, existing.status === "paid" ? "The earlier payment is verified. Refresh the course to open it." : "An earlier payment needs status review. No new checkout was opened.");
   }
   if (session.livemode !== !testMode || !trustedCheckoutUrl(session.url) || !session.id?.startsWith(`cs_${mode}_`) || !Number.isSafeInteger(session.expires_at) || session.expires_at <= Math.floor(Date.now() / 1000)) throw new ApiError(502, "Stripe did not return a valid checkout session for this mode.");
   const saved = await PaymentOrder.findOneAndUpdate({ _id: order._id, $or: [{ stripeSessionId: { $exists: false } }, { stripeSessionId: session.id }] }, { $set: { stripeSessionId: session.id, checkoutUrl: session.url, checkoutExpiresAt: new Date(session.expires_at * 1000) } }, { new: true }).select(SESSION_FIELDS);

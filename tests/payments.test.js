@@ -49,14 +49,25 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
   await mongoose.connect(`mongodb://127.0.0.1:${process.env.TEST_MONGO_PORT||27018}/lms_test_payments_${crypto.randomBytes(6).toString("hex")}`,{serverSelectionTimeoutMS:5000});
   await Promise.all([User,Session,Course,Category,Module,Lesson,Enrollment,Progress,VideoAsset,CourseNote,PaymentOrder,StripeEvent,AuditEvent].map(m=>m.init()));
   const server=await new Promise(resolve=>{const s=app.listen(0,"127.0.0.1",()=>resolve(s));});const base=`http://127.0.0.1:${server.address().port}/api`;
-  const sessions=new Map(), intents=new Map(), disputes=new Map(), creates=new Map();let failCreate=false, failRead=false, beforeReturn;
+  const sessions=new Map(), intents=new Map(), disputes=new Map(), creates=new Map(), legacyCache=new Map();let failCreate=false, failRead=false, beforeReturn, failList=false, listPageSize=100;let createCalls=0;
   const createError=new Stripe.errors.StripeInvalidRequestError({code:"parameter_missing",param:"customer",statusCode:400,requestId:"req_fixtureCreate",message:"fixture-private-provider-message",headers:{authorization:"fixture-private-authorization"}});
-  const fake={checkout:{sessions:{create:async(params,options)=>{
+  const fake={checkout:{sessions:{list:async(params)=>{
+    if(failList)throw new Error("mock provider list unavailable");
+    let data=[...sessions.values()].filter(s=>s.created>=params.created.gte).sort((a,b)=>b.id.localeCompare(a.id));
+    if(params.starting_after)data=data.slice(data.findIndex(s=>s.id===params.starting_after)+1);
+    const limit=Math.min(params.limit,listPageSize);return{data:structuredClone(data.slice(0,limit)),has_more:data.length>limit};
+  },create:async(params,options)=>{
+    createCalls++;
+    const prior=legacyCache.get(options.idempotencyKey)||creates.get(options.idempotencyKey);
+    if(prior){
+      if(JSON.stringify(prior.params)!==JSON.stringify(params))throw new Stripe.errors.StripeIdempotencyError({statusCode:400,requestId:"req_fixtureConflict",message:"fixture-private-idempotency-message"});
+      if(prior.error)throw prior.error;
+    }
     if (Object.hasOwn(params,"payment_method_types")) throw new Stripe.errors.StripeInvalidRequestError({param:"payment_method_types",statusCode:400,requestId:"req_fixtureRejectedMethods",message:"Synthetic account rejects a forced method list"});
     if(failCreate)throw createError;
     if(!creates.has(options.idempotencyKey)){
       const id=`cs_${mode}_`+crypto.randomBytes(6).toString("hex");
-      const session={id,livemode:!testMode,mode:params.mode,currency:"inr",amount_total:params.line_items[0].price_data.unit_amount,metadata:params.metadata,client_reference_id:params.client_reference_id,status:"open",payment_status:"unpaid",payment_intent:null,expires_at:Math.floor(Date.now()/1000)+86400,url:`https://checkout.stripe.com/c/pay/${id}`};sessions.set(id,session);creates.set(options.idempotencyKey,{params,session});
+      const session={id,created:Math.floor(Date.now()/1000),livemode:!testMode,mode:params.mode,currency:"inr",amount_total:params.line_items[0].price_data.unit_amount,metadata:params.metadata,client_reference_id:params.client_reference_id,status:"open",payment_status:"unpaid",payment_intent:null,expires_at:Math.floor(Date.now()/1000)+86400,url:`https://checkout.stripe.com/c/pay/${id}`};sessions.set(id,session);creates.set(options.idempotencyKey,{params,session});
     }
     await new Promise(r=>setTimeout(r,15));const session=creates.get(options.idempotencyKey).session;await beforeReturn?.(session);return structuredClone(session);
   },expire:async id=>{const s=sessions.get(id);assert.equal(s.payment_status,"unpaid");s.status="expired";return structuredClone(s);},retrieve:async id=>{if(failRead)throw new Error("mock unavailable");assert.ok(sessions.has(id));return structuredClone(sessions.get(id));}}},paymentIntents:{retrieve:async id=>{assert.ok(intents.has(id));return structuredClone(intents.get(id));}},disputes:{list:async({charge})=>({data:structuredClone(disputes.get(charge)||[])})},charges:{retrieve:async id=>{const intent=[...intents.values()].find(i=>i.latest_charge?.id===id);assert.ok(intent);return structuredClone(intent.latest_charge);}}};
@@ -83,7 +94,7 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
     }
   };
   try{
-    for(const [name,role] of [["teacher","instructor"],["other","instructor"],["admin","admin"],["student","student"],["stranger","student"],["second","student"],["race","student"],["early","student"],["delayed","student"],["delayedfail","student"]]){
+    for(const [name,role] of [["teacher","instructor"],["other","instructor"],["admin","admin"],["student","student"],["stranger","student"],["second","student"],["race","student"],["early","student"],["delayed","student"],["delayedfail","student"],["migrate","student"],["reuse","student"],["uncertain","student"],["legacy_paid","student"],["legacy_invalid","student"],["old_uncertain","student"],["old_reuse","student"]]){
       const password=crypto.randomBytes(24).toString("hex"),user=await User.create({name,role,email:`${name}@fixture.invalid`,password});users[name]={id:user._id,role,cookie:(await call("/auth/login",null,"POST",{email:user.email,password})).cookie};
     }
     const category=await Category.create({name:"General"});course=await Course.create({title:"Paid assigned course",description:"Fixture",instructor:users.teacher.id,category:category._id,price:123.45,isPublished:true});
@@ -135,10 +146,12 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
         console.error=(line)=>diagnosticLines.push(line);
         const failed=await create("second");assert.equal(failed.status,502);assert.doesNotMatch(JSON.stringify(failed.body),/fixture-private|req_fixtureCreate|parameter_missing/);
       } finally { console.error=previousLogger; }
-      assert.deepEqual(JSON.parse(diagnosticLines[0]),{event:"stripe_payment_failure",operation:"checkout_create",mode,type:"StripeInvalidRequestError",code:"parameter_missing",status:400,requestId:"req_fixtureCreate",param:"customer"});
+      assert.deepEqual(JSON.parse(diagnosticLines[0]),{event:"stripe_payment_failure",operation:"checkout_create",mode,type:"StripeInvalidRequestError",reason:"request_parameters",code:"parameter_missing",status:400,requestId:"req_fixtureCreate",param:"customer"});
       const failedOrder=await PaymentOrder.findOne({student:users.second.id});await PaymentOrder.updateOne({_id:failedOrder._id},{checkoutExpiresAt:new Date(0)});
       failCreate=false;const r=await create("second");assert.equal(r.status,201);assert.equal(r.body.data.order.id,String(failedOrder._id));assert.equal(await PaymentOrder.countDocuments({student:users.second.id}),1);
-      const recovered=await PaymentOrder.findById(failedOrder._id).select("+stripeSessionId");assert.equal(recovered.checkoutExpiresAt.getTime(),sessions.get(recovered.stripeSessionId).expires_at*1000);
+      const recovered=await PaymentOrder.findById(failedOrder._id).select("+stripeSessionId +checkoutContract");assert.equal(recovered.checkoutExpiresAt.getTime(),sessions.get(recovered.stripeSessionId).expires_at*1000);
+      assert.equal(recovered.checkoutContract.version,2);assert.match(recovered.checkoutContract.key,/-checkout-v2-/);assert.deepEqual(recovered.checkoutContract.request,creates.get(recovered.checkoutContract.key).params);
+      assert.equal(r.body.data.order.checkoutContract,undefined);assert.equal(r.body.data.order.checkoutRecoveryPlan,undefined);
       await call(`/courses/${course._id}`,users.teacher.cookie,"PATCH",{price:199.99});assert.equal((await create("student",crypto.randomUUID(),19999)).status,409);const retry=await create();assert.equal(retry.body.data.order.amountMinor,12345);await call(`/courses/${course._id}`,users.teacher.cookie,"PATCH",{price:123.45});
     });
     await t.test("real raw-body signatures reject forged/expired/modified/live/Connect events and oversized JSON",async()=>{
@@ -217,6 +230,42 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
         const unrelated=event(type,{id:"unrelated"});const ignored=await webhook(unrelated);assert.equal(ignored.status,200);assert.equal(ignored.body.ignored,true);
       }
       assert.equal(await StripeEvent.countDocuments({}),count);
+    });
+    await t.test("legacy recovery reuses existing sessions, migrates only a proven cached 400 and blocks unknown outcomes",async()=>{
+      const legacy=async(name)=>{
+        await Enrollment.create({student:users[name].id,course:course._id,assignedBy:users.teacher.id});
+        const row=await PaymentOrder.create({student:users[name].id,course:course._id,instructor:users.teacher.id,title:course.title,amountMinor:12345,requestKey:crypto.randomUUID(),checkoutExpiresAt:new Date(Date.now()+31*60000)});
+        const metadata={orderId:String(row._id),studentId:String(row.student),courseId:String(row.course)};
+        const current={mode:"payment",client_reference_id:String(row._id),metadata,payment_intent_data:{metadata},line_items:[{quantity:1,price_data:{currency:"inr",unit_amount:12345,product_data:{name:row.title}}}],success_url:`https://frontend.fixture.invalid/payments/${row._id}?checkout=success`,cancel_url:`https://frontend.fixture.invalid/payments/${row._id}?checkout=canceled`};
+        return{row,current,original:{...current,payment_method_types:["card"],expires_at:Math.floor(row.checkoutExpiresAt.getTime()/1000)},key:`lessonloop-${mode}-checkout-${row._id}`};
+      };
+      const old=await legacy("migrate");
+      legacyCache.set(old.key,{params:old.original,error:new Stripe.errors.StripeInvalidRequestError({statusCode:400,requestId:"req_fixtureSavedFailure",headers:{"idempotent-replayed":"true"},message:"fixture-private-cached-error"})});
+      const before=creates.size,results=await Promise.all([create("migrate"),create("migrate"),create("migrate")]);
+      for(const result of results){assert.equal(result.status,201,JSON.stringify(result.body));assert.equal(result.body.data.order.id,String(old.row._id));}
+      assert.equal(creates.size,before+1);assert.equal(await PaymentOrder.countDocuments({student:users.migrate.id}),1);
+      const saved=await PaymentOrder.findById(old.row._id).select("+checkoutContract +checkoutRecoveryPlan");assert.equal(saved.checkoutContract.version,2);assert.notEqual(saved.checkoutContract.key,old.key);assert.deepEqual(saved.checkoutContract.request,old.current);assert.deepEqual(saved.checkoutRecoveryPlan.original.request,old.original);await access(402,"migrate");
+      const seedSession=(old,status="open")=>{
+        const id=`cs_${mode}_`+crypto.randomBytes(6).toString("hex"),session={id,created:Math.floor(Date.now()/1000),livemode:!testMode,mode:"payment",currency:"inr",amount_total:12345,metadata:old.current.metadata,client_reference_id:String(old.row._id),status,payment_status:"unpaid",payment_intent:null,expires_at:Math.floor(Date.now()/1000)+86400,url:`https://checkout.stripe.com/c/pay/${id}`};sessions.set(id,session);return session;
+      };
+      const reuse=await legacy("reuse"),existing=seedSession(reuse);listPageSize=2;const count=createCalls;
+      const reused=await create("reuse");assert.equal(reused.status,201);assert.equal(reused.body.data.url,existing.url);assert.equal(createCalls,count);listPageSize=100;
+      const paid=await legacy("legacy_paid");seedSession(paid);pay(paid.row);const countPaid=createCalls;assert.equal((await create("legacy_paid")).status,409);assert.equal(createCalls,countPaid);await access(200,"legacy_paid");
+      const uncertain=await legacy("uncertain");legacyCache.set(uncertain.key,{params:uncertain.original,error:new Stripe.errors.StripeAPIError({statusCode:500,requestId:"req_fixtureUnknownOutcome",headers:{"idempotent-replayed":"true"},message:"fixture-private-server-error"})});
+      const size=creates.size;assert.equal((await create("uncertain")).status,502);assert.equal(creates.size,size);assert.equal((await PaymentOrder.findById(uncertain.row._id).select("+checkoutContract")).checkoutContract,undefined);await access(402,"uncertain");
+      failList=true;const calls=createCalls;assert.equal((await create("uncertain")).status,503);assert.equal(createCalls,calls);failList=false;
+      const invalid=await legacy("legacy_invalid"),invalidSession=seedSession(invalid);invalidSession.amount_total=1;const invalidCalls=createCalls;assert.equal((await create("legacy_invalid")).status,409);assert.equal(createCalls,invalidCalls);await access(402,"legacy_invalid");
+      const pruned=await legacy("old_uncertain");await PaymentOrder.collection.updateOne({_id:pruned.row._id},{$set:{createdAt:new Date(Date.now()-25*3600000)}});const prunedCalls=createCalls;assert.equal((await create("old_uncertain")).status,409);assert.equal(createCalls,prunedCalls);await access(402,"old_uncertain");
+    });
+    await t.test("a versioned key outside Stripe's retention window only reuses a reconciled Session",async()=>{
+      await Enrollment.create({student:users.old_reuse.id,course:course._id,assignedBy:users.teacher.id});
+      failCreate=true;const failed=await create("old_reuse");failCreate=false;assert.equal(failed.status,502);
+      const row=await PaymentOrder.findOne({student:users.old_reuse.id}).select("+checkoutContract");
+      const oldContract={...row.checkoutContract,createdAt:new Date(Date.now()-25*3600000).toISOString()};
+      await PaymentOrder.collection.updateOne({_id:row._id},{$set:{checkoutContract:oldContract}});
+      const calls=createCalls;assert.equal((await create("old_reuse")).status,409);assert.equal(createCalls,calls);await access(402,"old_reuse");
+      const session=await fake.checkout.sessions.create(row.checkoutContract.request,{idempotencyKey:row.checkoutContract.key});const existingCalls=createCalls;
+      const recovered=await create("old_reuse");assert.equal(recovered.status,201);assert.equal(recovered.body.data.url,session.url);assert.equal(createCalls,existingCalls);await access(402,"old_reuse");
     });
     await t.test("payment never creates nomination or reopens archive/unpublished/suspended access; paid progress retained",async()=>{
       const progress=await Progress.findOne({student:users.student.id,course:course._id});assert.ok(progress);
