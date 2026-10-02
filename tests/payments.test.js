@@ -276,6 +276,34 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
       await User.updateOne({_id:users.student.id},{status:"suspended"});await access(401);await User.updateOne({_id:users.student.id},{status:"active"});await access(200);
       assert.equal(await PaymentOrder.countDocuments({student:users.student.id,course:course._id}),1);
     });
+    await t.test("instructor free/paid transitions bypass unavailable Stripe only for assigned students and retain purchases",async()=>{
+      const history=await PaymentOrder.find({course:course._id}).sort("_id").lean();
+      const unpaid=history.find(order=>String(order.student)===String(users.migrate.id));assert.ok(unpaid);assert.notEqual(unpaid.status,"paid");
+      const savedProgress=await Progress.findOne({student:users.student.id,course:course._id}).lean();
+      assert.equal((await call(`/courses/${course._id}`,users.student.cookie,"PATCH",{price:0})).status,403);
+      assert.equal((await call(`/courses/${course._id}`,users.other.cookie,"PATCH",{price:0})).status,403);
+      assert.equal((await call(`/courses/${course._id}`,users.teacher.cookie,"PATCH",{price:0})).status,200);
+      const key=process.env.STRIPE_SECRET_KEY,signing=process.env.STRIPE_WEBHOOK_SECRET,calls=createCalls;
+      delete process.env.STRIPE_SECRET_KEY;delete process.env.STRIPE_WEBHOOK_SECRET;failCreate=true;failRead=true;failList=true;
+      try {
+        await access(200);await access(200,"migrate");await access(403,"stranger");
+        for(let renewal=0;renewal<2;renewal++) assert.equal((await call(`/lessons/${videoLesson._id}/playback`,users.second.cookie)).status,200);
+        const freeQuote=(await call(`/payments/courses/${course._id}/quote`,users.second.cookie)).body.data;
+        assert.equal(freeQuote.readiness.configured,false);assert.equal(freeQuote.quote.amountMinor,0);assert.equal(freeQuote.quote.requiresPayment,false);assert.equal(freeQuote.quote.pendingOrderId,undefined);
+        const listed=(await call("/enrollments/me",users.second.cookie)).body.data.enrollments.find(item=>String(item.course._id)===String(course._id));
+        assert.equal(listed.course.payment.required,false);assert.equal(listed.course.payment.status,"free");assert.equal(listed.course.payment.amountMinor,0);assert.equal(createCalls,calls);
+        await Course.updateOne({_id:course._id},{isPublished:false});await access(403,"migrate");
+        await Course.updateOne({_id:course._id},{isPublished:true,archivedAt:new Date()});await access(410,"migrate");
+        await Course.updateOne({_id:course._id},{archivedAt:null});
+      } finally {process.env.STRIPE_SECRET_KEY=key;process.env.STRIPE_WEBHOOK_SECRET=signing;failCreate=false;failRead=false;failList=false;}
+      assert.deepEqual(await PaymentOrder.find({course:course._id}).sort("_id").lean(),history);
+      const retainedProgress=await Progress.findOne({student:users.student.id,course:course._id}).lean();
+      assert.equal(String(retainedProgress._id),String(savedProgress._id));assert.deepEqual(retainedProgress.completedLessons,savedProgress.completedLessons);assert.equal(retainedProgress.percentage,savedProgress.percentage);
+      assert.equal((await call(`/courses/${course._id}`,users.teacher.cookie,"PATCH",{price:123.45})).status,200);
+      await access(200);await access(402,"migrate");await access(403,"stranger");
+      assert.deepEqual(await PaymentOrder.find({course:course._id}).sort("_id").lean(),history);
+      const made=await call("/courses",users.teacher.cookie,"POST",{title:"Explicitly free course",description:"Fixture",category:String(category._id),price:0});assert.equal(made.status,201);assert.equal(made.body.data.course.price,0);
+    });
   }finally{
     await new Promise(resolve=>server.close(resolve));delete app.locals.stripeClient;delete app.locals.directVideoStore;delete app.locals.courseNoteStore;
     assert.match(mongoose.connection.name,/^lms_test_payments_/);await mongoose.connection.dropDatabase();await mongoose.disconnect();delete process.env.STRIPE_MODE;delete process.env.CLIENT_URL;delete process.env.STRIPE_SECRET_KEY;delete process.env.STRIPE_WEBHOOK_SECRET;

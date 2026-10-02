@@ -88,8 +88,12 @@ export function publicOrder(order) {
   return { id: String(order._id), courseId: String(order.course), title: order.title, amountMinor: order.amountMinor, currency: "inr", status: order.status, testMode: order.testMode, refundedMinor: order.refundedMinor, paidAt: order.paidAt, checkoutExpiresAt: order.checkoutExpiresAt };
 }
 export async function quoteCourse(courseId, user) {
-  const mode = stripeMode(), testMode = mode === "test", PaymentOrder = paymentOrderModel(mode);
   const course = await requireCourseNomination(courseId, user);
+  const mode = stripeMode(), testMode = mode === "test";
+  // A course explicitly made free never inherits an older pending paid quote.
+  // Historical orders remain intact and can still be reconciled independently.
+  if (!course.price) return { courseId: String(course._id), title: course.title, amountMinor: 0, currency: "inr", testMode, paid: false, requiresPayment: false };
+  const PaymentOrder = paymentOrderModel(mode);
   const existing = await PaymentOrder.findOne({ student: user._id, course: course._id, status: "paid", testMode });
   // Keep an expired-but-unreconciled attempt reachable so its owner can check
   // canonical Stripe status before opening a replacement checkout.
