@@ -1,49 +1,53 @@
 import crypto from "node:crypto";
 import mongoose from "mongoose";
-import PaymentOrder from "../models/PaymentOrder.js";
-import StripeEvent from "../models/StripeEvent.js";
+import { paymentOrderModel } from "../models/PaymentOrder.js";
+import { stripeEventModel } from "../models/StripeEvent.js";
 import User from "../models/User.js";
 import ApiError from "../utils/ApiError.js";
 import { requireCourseNomination } from "./courseAccess.js";
 import { ensureCourseReady } from "./courseReadiness.js";
 import { rupeesToMinor } from "./coursePricing.js";
-import { requireStripeTestSettings, trustedCheckoutUrl } from "./stripeClient.js";
+import { requireStripeSettings, trustedCheckoutUrl, checkoutOrigin, assertStripeEventMode } from "./stripeClient.js";
+import { stripeMode } from "./stripeMode.js";
 
 const SESSION_FIELDS = "+stripeSessionId +stripePaymentIntentId +checkoutUrl";
 const ref = (value) => typeof value === "string" ? value : value?.id;
 export const paymentEvents = new Set(["checkout.session.completed", "checkout.session.async_payment_succeeded", "checkout.session.async_payment_failed", "checkout.session.expired", "payment_intent.succeeded", "payment_intent.payment_failed", "payment_intent.canceled", "charge.refunded", "charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed"]);
 
 export function publicOrder(order) {
-  return { id: String(order._id), courseId: String(order.course), title: order.title, amountMinor: order.amountMinor, currency: "inr", status: order.status, testMode: true, refundedMinor: order.refundedMinor, paidAt: order.paidAt, checkoutExpiresAt: order.checkoutExpiresAt };
+  return { id: String(order._id), courseId: String(order.course), title: order.title, amountMinor: order.amountMinor, currency: "inr", status: order.status, testMode: order.testMode, refundedMinor: order.refundedMinor, paidAt: order.paidAt, checkoutExpiresAt: order.checkoutExpiresAt };
 }
 export async function quoteCourse(courseId, user) {
+  const mode = stripeMode(), testMode = mode === "test", PaymentOrder = paymentOrderModel(mode);
   const course = await requireCourseNomination(courseId, user);
-  const existing = await PaymentOrder.findOne({ student: user._id, course: course._id, status: "paid", testMode: true });
+  const existing = await PaymentOrder.findOne({ student: user._id, course: course._id, status: "paid", testMode });
   // Keep an expired-but-unreconciled attempt reachable so its owner can check
   // canonical Stripe status before opening a replacement checkout.
-  const pending = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true });
-  return { courseId: String(course._id), title: course.title, amountMinor: pending?.amountMinor ?? rupeesToMinor(course.price), currency: "inr", testMode: true, paid: Boolean(existing), requiresPayment: course.price > 0 && !existing, ...(pending ? { pendingOrderId: String(pending._id) } : {}) };
+  const pending = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode });
+  return { courseId: String(course._id), title: course.title, amountMinor: pending?.amountMinor ?? rupeesToMinor(course.price), currency: "inr", testMode, paid: Boolean(existing), requiresPayment: course.price > 0 && !existing, ...(pending ? { pendingOrderId: String(pending._id) } : {}) };
 }
 
 export async function startCheckout(courseId, user, requestKey, quotedAmountMinor, stripe) {
-  requireStripeTestSettings();
+  const { mode, testMode } = requireStripeSettings(), PaymentOrder = paymentOrderModel(mode);
+  const origin = checkoutOrigin();
   if (typeof requestKey !== "string" || !/^[A-Za-z0-9_-]{16,80}$/.test(requestKey)) throw new ApiError(400, "Send a stable Idempotency-Key (16–80 letters, digits, underscores or hyphens) when retrying checkout.");
   const course = await requireCourseNomination(courseId, user);
   await ensureCourseReady(course._id);
   const amountMinor = rupeesToMinor(course.price);
   if (!amountMinor) throw new ApiError(409, "This course is free; no payment is needed.");
-  if (await PaymentOrder.exists({ student: user._id, course: course._id, status: "paid", testMode: true })) throw new ApiError(409, "This course is already paid for.");
-  const hash = crypto.createHash("sha256").update(`${user._id}:${requestKey}`).digest("hex");
-  let order = await PaymentOrder.findOne({ student: user._id, requestKey: hash }).select(SESSION_FIELDS);
+  if (await PaymentOrder.exists({ student: user._id, course: course._id, status: "paid", testMode })) throw new ApiError(409, "This course is already paid for.");
+  // Keep the established test hash stable so pre-release retries still work.
+  const hash = crypto.createHash("sha256").update(`${testMode ? "" : "live:"}${user._id}:${requestKey}`).digest("hex");
+  let order = await PaymentOrder.findOne({ student: user._id, requestKey: hash, testMode }).select(SESSION_FIELDS);
   if (order && String(order.course) !== String(course._id)) throw new ApiError(409, "This checkout key belongs to another course.");
-  if (!order) order = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true }).select(SESSION_FIELDS);
+  if (!order) order = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode }).select(SESSION_FIELDS);
   if (!order) {
     if (quotedAmountMinor !== amountMinor) throw new ApiError(409, "The course price changed. Refresh the price before paying.");
     try {
-      order = await PaymentOrder.findOneAndUpdate({ student: user._id, requestKey: hash }, { $setOnInsert: { course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", testMode: true, checkoutExpiresAt: new Date(Date.now() + 31 * 60 * 1000) } }, { upsert: true, new: true, runValidators: true }).select(SESSION_FIELDS);
+      order = await PaymentOrder.findOneAndUpdate({ student: user._id, requestKey: hash, testMode }, { $setOnInsert: { course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", checkoutExpiresAt: new Date(Date.now() + 31 * 60 * 1000) } }, { upsert: true, new: true, runValidators: true }).select(SESSION_FIELDS);
     } catch (error) {
       if (error.code !== 11000) throw error;
-      order = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true }).select(SESSION_FIELDS);
+      order = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode }).select(SESSION_FIELDS);
     }
   }
   if (!order || String(order.course) !== String(course._id)) throw new ApiError(409, "This checkout attempt belongs to another course.");
@@ -51,14 +55,12 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   if (order.checkoutExpiresAt < new Date()) throw new ApiError(409, "This checkout attempt expired. Start a new attempt.");
   if (["paid", "refunded", "partially_refunded", "disputed", "reversed"].includes(order.status)) throw new ApiError(409, "This payment has finished or needs review. Refresh its status before starting another.");
   if (order.checkoutUrl) return { order: publicOrder(order), url: order.checkoutUrl };
-  const origin = new URL(process.env.CLIENT_URL || "http://localhost:5173");
-  if ((origin.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(origin.hostname)) || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) throw new ApiError(503, "CLIENT_URL must be the verified frontend origin.");
   const metadata = { orderId: String(order._id), studentId: String(order.student), courseId: String(order.course) };
   let session;
   try {
-    session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], client_reference_id: String(order._id), metadata, payment_intent_data: { metadata }, line_items: [{ quantity: 1, price_data: { currency: "inr", unit_amount: order.amountMinor, product_data: { name: order.title } } }], success_url: `${origin.origin}/payments/${order._id}?checkout=success`, cancel_url: `${origin.origin}/payments/${order._id}?checkout=canceled`, expires_at: Math.floor(order.checkoutExpiresAt.getTime() / 1000) }, { idempotencyKey: `lessonloop-test-checkout-${order._id}` });
-  } catch { throw new ApiError(502, "Stripe test checkout is temporarily unavailable. Retry this same payment attempt."); }
-  if (session.livemode !== false || !trustedCheckoutUrl(session.url) || !session.id?.startsWith("cs_test_")) throw new ApiError(502, "Stripe did not return a valid test checkout session.");
+    session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], client_reference_id: String(order._id), metadata, payment_intent_data: { metadata }, line_items: [{ quantity: 1, price_data: { currency: "inr", unit_amount: order.amountMinor, product_data: { name: order.title } } }], success_url: `${origin.origin}/payments/${order._id}?checkout=success`, cancel_url: `${origin.origin}/payments/${order._id}?checkout=canceled`, expires_at: Math.floor(order.checkoutExpiresAt.getTime() / 1000) }, { idempotencyKey: `lessonloop-${mode}-checkout-${order._id}` });
+  } catch { throw new ApiError(502, "Stripe checkout is temporarily unavailable. Retry this same payment attempt."); }
+  if (session.livemode !== !testMode || !trustedCheckoutUrl(session.url) || !session.id?.startsWith(`cs_${mode}_`)) throw new ApiError(502, "Stripe did not return a valid checkout session for this mode.");
   const saved = await PaymentOrder.findOneAndUpdate({ _id: order._id, $or: [{ stripeSessionId: { $exists: false } }, { stripeSessionId: session.id }] }, { $set: { stripeSessionId: session.id, checkoutUrl: session.url } }, { new: true }).select(SESSION_FIELDS);
   if (!saved) throw new ApiError(409, "The payment attempt changed. Refresh before paying.");
   try {
@@ -69,7 +71,7 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
     // session before returning a redirect. A completed charge remains recorded.
     try {
       const expired = await stripe.checkout.sessions.expire(session.id);
-      if (expired.livemode === false && expired.status === "expired") await PaymentOrder.updateOne({ _id: order._id, status: { $in: ["pending", "failed"] } }, { $set: { status: "expired", active: false } });
+      if (expired.livemode === !testMode && expired.status === "expired") await PaymentOrder.updateOne({ _id: order._id, status: { $in: ["pending", "failed"] } }, { $set: { status: "expired", active: false } });
     } catch { /* Preserve the order for signed webhook/reconciliation recovery. */ }
     throw error;
   }
@@ -78,11 +80,13 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
 
 function assertSession(order, session) {
   const metadata = session.metadata || {};
-  if (session.livemode !== false || session.mode !== "payment" || session.currency !== "inr" || session.amount_total !== order.amountMinor || session.client_reference_id !== String(order._id) || metadata.orderId !== String(order._id) || metadata.studentId !== String(order.student) || metadata.courseId !== String(order.course) || (order.stripeSessionId && order.stripeSessionId !== session.id)) throw new ApiError(409, "Stripe payment details do not match this order.");
+  const mode = order.testMode ? "test" : "live";
+  if (session.livemode !== !order.testMode || !session.id?.startsWith(`cs_${mode}_`) || session.mode !== "payment" || session.currency !== "inr" || session.amount_total !== order.amountMinor || session.client_reference_id !== String(order._id) || metadata.orderId !== String(order._id) || metadata.studentId !== String(order.student) || metadata.courseId !== String(order.course) || (order.stripeSessionId && order.stripeSessionId !== session.id)) throw new ApiError(409, "Stripe payment details do not match this order.");
 }
 export async function reconcileOrder(orderId, sessionId, stripe, eventCreated) {
+  const { mode, testMode } = requireStripeSettings(), PaymentOrder = paymentOrderModel(mode);
   const token = crypto.randomUUID(), now = new Date();
-  const order = await PaymentOrder.findOneAndUpdate({ _id: orderId, $or: [{ reconciliationLeaseUntil: { $exists: false } }, { reconciliationLeaseUntil: { $lt: now } }] }, { $set: { reconciliationToken: token, reconciliationLeaseUntil: new Date(Date.now() + 90000) } }, { new: true }).select(SESSION_FIELDS);
+  const order = await PaymentOrder.findOneAndUpdate({ _id: orderId, testMode, $or: [{ reconciliationLeaseUntil: { $exists: false } }, { reconciliationLeaseUntil: { $lt: now } }] }, { $set: { reconciliationToken: token, reconciliationLeaseUntil: new Date(Date.now() + 90000) } }, { new: true }).select(SESSION_FIELDS);
   if (!order) throw new ApiError(503, "Payment status is being checked. Retry shortly.");
   try {
     const session = await stripe.checkout.sessions.retrieve(sessionId || order.stripeSessionId);
@@ -91,10 +95,10 @@ export async function reconcileOrder(orderId, sessionId, stripe, eventCreated) {
     if (paymentIntentId) {
       const intent = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ["latest_charge"] });
       const meta = intent.metadata || {};
-      if (intent.livemode !== false || intent.amount !== order.amountMinor || intent.currency !== "inr" || meta.orderId !== String(order._id) || meta.studentId !== String(order.student) || meta.courseId !== String(order.course)) throw new ApiError(409, "Stripe payment intent does not match this order.");
+      if (intent.livemode !== !testMode || intent.id !== paymentIntentId || (order.stripePaymentIntentId && order.stripePaymentIntentId !== intent.id) || intent.amount !== order.amountMinor || intent.currency !== "inr" || meta.orderId !== String(order._id) || meta.studentId !== String(order.student) || meta.courseId !== String(order.course)) throw new ApiError(409, "Stripe payment intent does not match this order.");
       const charge = intent.latest_charge;
-      if (charge && (typeof charge !== "object" || charge.amount !== order.amountMinor || charge.currency !== "inr" || ref(charge.payment_intent) !== intent.id)) throw new ApiError(409, "Stripe charge does not match this order.");
-      if (session.payment_status === "paid" && intent.status === "succeeded" && charge?.paid === true && charge.status === "succeeded" && charge.livemode === false) status = "paid";
+      if (charge && (typeof charge !== "object" || charge.livemode !== !testMode || charge.amount !== order.amountMinor || charge.currency !== "inr" || ref(charge.payment_intent) !== intent.id)) throw new ApiError(409, "Stripe charge does not match this order.");
+      if (session.payment_status === "paid" && intent.status === "succeeded" && charge?.paid === true && charge.status === "succeeded") status = "paid";
       else if (intent.status === "canceled" || intent.last_payment_error) status = "failed";
       refundedMinor = Number(charge?.amount_refunded || 0);
       if (!Number.isSafeInteger(refundedMinor) || refundedMinor < 0 || refundedMinor > order.amountMinor) throw new ApiError(409, "Stripe refund amount does not match this order.");
@@ -102,6 +106,7 @@ export async function reconcileOrder(orderId, sessionId, stripe, eventCreated) {
       if (charge?.disputed) {
         const disputes = await stripe.disputes.list({ charge: charge.id, limit: 10 });
         if (!disputes.data?.length) throw new ApiError(503, "Stripe dispute details are not available yet.");
+        if (disputes.data.some((dispute) => dispute.livemode !== !testMode || ref(dispute.charge) !== charge.id || ref(dispute.payment_intent) !== intent.id)) throw new ApiError(409, "Stripe dispute does not match this order.");
         if (disputes.data.some((dispute) => dispute.status === "lost")) status = "reversed";
         else if (disputes.data.some((dispute) => dispute.status !== "won")) status = "disputed";
       }
@@ -118,6 +123,8 @@ export async function reconcileOrder(orderId, sessionId, stripe, eventCreated) {
 }
 
 export async function handlePaymentEvent(event, stripe) {
+  const { mode, testMode } = requireStripeSettings(), PaymentOrder = paymentOrderModel(mode), StripeEvent = stripeEventModel(mode);
+  assertStripeEventMode(event);
   if (!paymentEvents.has(event.type)) return { ignored: true };
   if (!/^evt_[A-Za-z0-9_]+$/.test(event.id) || !Number.isSafeInteger(event.created)) throw new ApiError(400, "Invalid Stripe event.");
   const token = crypto.randomUUID();

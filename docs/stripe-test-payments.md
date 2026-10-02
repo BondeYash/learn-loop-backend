@@ -1,6 +1,6 @@
-# Stripe test payments
+# Stripe test and live payments
 
-This release uses one platform-owned Stripe account, INR, hosted Checkout and **test mode only**. No Connect transfers, split payouts, subscriptions, voluntary refund endpoint or live-payment path is included. Course prices remain INR rupees in the existing `Course.price` field; immutable orders store integer paise. Existing zero/unpriced courses are not migrated to paid courses.
+This release uses one platform-owned Stripe account, INR, hosted card Checkout and an explicit **test or live** mode. Live Checkout can charge real money when enabled by the user. No Connect transfers, split payouts, subscriptions or voluntary refund endpoint is included. The filename is retained for existing documentation links. Course prices remain INR rupees in the existing `Course.price` field; immutable orders store integer paise. Existing zero/unpriced courses are not migrated to paid courses.
 
 An instructor/admin sets INR 0 for a free course or INR 0.50–999999.99 with at most two decimals. Assignment nominates a student; it **does not waive payment for a paid course**. A paid student needs a current assignment, an active account, a published/unarchived course and a verified `paid` order to read lessons/progress or receive fresh private video/PDF links. Owner/admin previews retain their existing role checks. Payment never creates an assignment, reopens an archived course, or clears learning progress. No timed access expiry has been added; the access-duration decision is still open. This is not a lifetime-access promise.
 
@@ -11,20 +11,25 @@ Published assigned courses remain visible on both the dashboard and course list 
 Use the existing Render backend service's private Environment settings. Do not put secrets in chat, source control, frontend settings, `VITE_` variables or browser code.
 
 ```dotenv
+STRIPE_MODE=test
 STRIPE_SECRET_KEY=sk_test_REPLACE_PRIVATELY
 STRIPE_WEBHOOK_SECRET=whsec_REPLACE_PRIVATELY
 CLIENT_URL=https://YOUR_EXISTING_FRONTEND_ORIGIN
 ```
 
-`CLIENT_URL` already exists and must be the exact HTTPS frontend origin, without a path, credentials, query string or fragment. Local localhost/127.0.0.1 development may use HTTP. Missing payment settings disable checkout without disabling free courses. A configured live secret key prevents backend startup. Payment routes also reject live keys, live provider objects, Connect and organization webhook contexts. Hosted Checkout redirects do not need `STRIPE_PUBLISHABLE_KEY` or a frontend publishable key. Any existing publishable environment variable is unused.
+For live payments, set **`STRIPE_MODE=live`**, use an `sk_live_` value in **`STRIPE_SECRET_KEY`**, and enter the separate **live destination's** `whsec_` value in **`STRIPE_WEBHOOK_SECRET`**. These exact backend variable names are the contract; no frontend mode flag or key is required. `STRIPE_MODE` defaults to `test` only when absent. Empty, upper-case or other values fail closed. Mode is never inferred from the key or browser input. To return to testing, change all three settings to test mode and its matching key/destination secret together.
+
+`CLIENT_URL` must be the exact frontend origin, without a path, credentials, query string or fragment. **Live mode requires HTTPS**. Test-mode localhost/127.0.0.1 development may use HTTP. Missing payment settings disable checkout without disabling free courses. Invalid mode, mismatched key prefix or an invalid configured signing-secret format prevents backend startup before database/object-store work. Routes also enforce configuration and reject opposite-mode provider objects/events, Connect and organization contexts. A `whsec_` prefix does not encode mode/account; signature verification and event `livemode` validate incoming events. Nonsecret `configured` readiness is a syntax check, not proof of valid credentials or account activation. Hosted redirects do not use `STRIPE_PUBLISHABLE_KEY` or any frontend publishable key.
+
+Existing test collections `paymentorders` / `stripeevents` are preserved, including their indexes. Live records use separate `livepaymentorders` / `livestripeevents` collections with the same unique checkout/event constraints, without a data/index migration. Test payments never grant live access, or vice versa. Opposite-mode bookmarked orders return `404`; test pending orders cannot block live Checkout. Switching mode preserves records but hides the other mode's paid grants and outstanding orders. One deployment processes one mode at a time; opposite-mode webhook deliveries are rejected. Use a separate backend deployment if both modes must operate concurrently.
 
 The pinned official Node SDK is **stripe 23.0.0**, with API version **2026-09-30.endive**, verified against its generated version and runtime configuration. The backend uses `npm ci` / `npm start`; no new worker/service/provider is required. Startup initializes the unique payment indexes. Preserve existing MongoDB, cookie/session, private R2, thumbnail and PDF settings. There are no conversion packages/assets in this release.
 
-Deploy backend before frontend, then confirm the existing health endpoint and free course access. Until the new backend is deployed, the webhook route below does not exist on the public service. Adding a Stripe destination alone does not deploy application code.
+Deploy backend before frontend, then confirm the existing health endpoint and free course access. Both mode changes must be deployed: the earlier test-only backend still rejects live keys, and the earlier frontend rejects live Checkout responses. Adding a live Stripe destination or redeploying an older commit alone does not install this release.
 
 ## Webhook destination
 
-In the same Stripe **test environment/sandbox** as the `sk_test_` key, create a snapshot-event webhook destination for **Your account**. Use API version **2026-09-30.endive**, and the existing public Render **backend** origin followed by:
+Create a snapshot-event webhook destination for **Your account** in the matching mode/account: the same sandbox as the test key, or a **separate live destination** for the live key. Use API version **2026-09-30.endive**, and the existing public Render **backend** origin followed by:
 
 ```text
 /api/payments/webhook
@@ -48,7 +53,7 @@ charge.dispute.updated
 charge.dispute.closed
 ```
 
-The handler verifies the official signature/timestamp and retrieves canonical Session, PaymentIntent, Charge and, when applicable, Dispute state from Stripe. It checks test mode, local order/student/course identity, mode, currency and exact amounts. The success-return query string never establishes payment. Unknown/other-account payments are ignored or rejected; failed processing returns a retryable error. Database event and per-order leases prevent concurrent work, and unique indexes prevent duplicate active checkout attempts. Canonical state makes stale success/expiry events safe after a refund or newer payment state.
+The handler verifies the official signature/timestamp and retrieves canonical Session, PaymentIntent, Charge and, when applicable, Dispute state from Stripe. It checks configured mode on events and canonical provider objects, local order/student/course identity, payment mode, currency and exact amounts. The success-return query string never establishes payment. Unknown/other-account payments are ignored or rejected; failed processing returns a retryable error. Correctly signed, same-mode events outside the 11 supported types receive `200` with `ignored: true`, without order changes or provider API calls. Selecting all checkout/payment_intent/charge categories safely sends extra events; selecting only the list above avoids unnecessary deliveries. Invalid signatures, opposite-mode and Connect/organization events are rejected even for unsupported event types. Database event and per-order leases prevent concurrent work, and unique indexes prevent duplicate active checkout attempts. Canonical state makes stale success/expiry events safe after a refund or newer payment state.
 
 Successful full/partial provider refunds, open disputes and lost/reversed disputes remove fresh paid-content access. A won dispute can restore paid status only when current canonical payment/refund state permits it. There is no in-app voluntary-refund action; this application behavior does not supersede provider or statutory requirements. Already-issued private R2 links remain bearer credentials until their existing expiry (normally five minutes); buffered/downloaded bytes cannot be revoked.
 
@@ -62,7 +67,11 @@ Successful full/partial provider refunds, open disputes and lost/reversed disput
 
 Checkout/provider-refresh calls are limited to 30 per student per 15 minutes in addition to the existing API limits. Checkout sessions expire after approximately 31 minutes; this timeout is separate from course-access duration. To retire an expired attempt when delivery is delayed, use **Check payment status** on its return page. Card Checkout is the implemented method; UPI and other methods are not promised. Supported methods, country/account restrictions and deployed cookie/proxy behavior require a sandbox check in the user's actual account.
 
-## User-run hosted sandbox check after deployment
+## User-run hosted checks after deployment
+
+Account activation, supported live methods, deployed cookies/proxy behavior and webhook delivery are not verified by local tests. The user reported setting private live credentials and creating a live destination; no credential values or account settings were inspected. For user-controlled live validation, confirm the deployed commits, `STRIPE_MODE=live`, matching private credentials and HTTPS origin; the paywall must show **Live payment** and **Continue to payment**. Any actual live purchase, refund or payout is the user's action, not part of agent validation. Stripe test card numbers belong only in test mode.
+
+For sandbox validation with matching test settings:
 
 1. Set an INR price on a synthetic course, add ready content and nominate a synthetic student. Keep a second student unassigned and a separate zero-price course for regression checks.
 2. Sign in as the nominated student. The paid course must show a paywall and reveal no lessons/PDF links; the zero-price course should still open normally.
@@ -74,4 +83,4 @@ Local checks use real HTTP, disposable MongoDB, official Stripe signature genera
 
 Run `node --test tests/payments.test.js` or `npm test` with a disposable MongoDB on `TEST_MONGO_PORT` (default 27018). Tests create/drop only randomly named `lms_test_*` databases. Browser checks are documented in the frontend.
 
-Primary references: [Stripe hosted Checkout](https://docs.stripe.com/payments/checkout/how-checkout-works), [webhook signatures and retries](https://docs.stripe.com/webhooks), [idempotent requests](https://docs.stripe.com/api/idempotent_requests), [INR minor units and limits](https://docs.stripe.com/currencies).
+Primary references: [Stripe keys and mode isolation](https://docs.stripe.com/keys), [Stripe hosted Checkout](https://docs.stripe.com/payments/checkout/how-checkout-works), [webhook signatures and retries](https://docs.stripe.com/webhooks), [idempotent requests](https://docs.stripe.com/api/idempotent_requests), [INR minor units and limits](https://docs.stripe.com/currencies).

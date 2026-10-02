@@ -1,7 +1,8 @@
 import Course from "../models/Course.js";
 import Enrollment from "../models/Enrollment.js";
 import ApiError from "../utils/ApiError.js";
-import PaymentOrder from "../models/PaymentOrder.js";
+import { paymentOrderModel } from "../models/PaymentOrder.js";
+import { stripeMode } from "./stripeMode.js";
 export const managesCourse = (course, user) => user.role === "admin" || (user.role === "instructor" && String(course.instructor._id || course.instructor) === String(user._id));
 export async function requireCourseNomination(courseId, user) {
   const course = await Course.findById(courseId);
@@ -15,7 +16,8 @@ export async function requireCourseNomination(courseId, user) {
 export async function requireCourseAccess(courseId, user) {
   const course = await requireCourseNomination(courseId, user);
   if (managesCourse(course, user) || !course.price) return course;
-  const payment = await PaymentOrder.exists({ student: user._id, course: course._id, status: "paid", testMode: true });
+  const mode = stripeMode();
+  const payment = await paymentOrderModel(mode).exists({ student: user._id, course: course._id, status: "paid", testMode: mode === "test" });
   if (!payment) {
     const error = new ApiError(402, "Payment is required to access this assigned course.");
     error.code = "PAYMENT_REQUIRED";

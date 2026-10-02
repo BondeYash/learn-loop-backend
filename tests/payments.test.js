@@ -14,11 +14,11 @@ import Enrollment from "../models/Enrollment.js";
 import Progress from "../models/Progress.js";
 import VideoAsset from "../models/VideoAsset.js";
 import CourseNote from "../models/CourseNote.js";
-import PaymentOrder from "../models/PaymentOrder.js";
-import StripeEvent from "../models/StripeEvent.js";
+import { paymentOrderModel } from "../models/PaymentOrder.js";
+import { stripeEventModel } from "../models/StripeEvent.js";
 import AuditEvent from "../models/AuditEvent.js";
 import { rupeesToMinor } from "../services/coursePricing.js";
-import { stripeReadiness, STRIPE_API_VERSION, trustedCheckoutUrl } from "../services/stripeClient.js";
+import { stripeReadiness, STRIPE_API_VERSION, trustedCheckoutUrl, validateStripeStartup } from "../services/stripeClient.js";
 
 test("INR paise conversion is exact and rejects rounding, invalid prices and unsafe Checkout URLs", () => {
   for (const [value, amount] of [[0,0],["0.50",50],["12.34",1234],[1999.99,199999],["999999.99",99999999]]) assert.equal(rupeesToMinor(value),amount);
@@ -27,11 +27,25 @@ test("INR paise conversion is exact and rejects rounding, invalid prices and uns
   for(const url of ["https://checkout.stripe.com.evil.invalid","javascript:alert(1)","http://checkout.stripe.com","https://user@checkout.stripe.com","https://checkout.stripe.com:8443"]) assert.equal(trustedCheckoutUrl(url),false);
   assert.equal(stripeReadiness({STRIPE_SECRET_KEY:"sk_live_fixture",STRIPE_WEBHOOK_SECRET:"whsec_fixture"}).configured,false);
   assert.equal(stripeReadiness({}).configured,false);
+  for (const mode of ["test","live"]) {
+    const settings={STRIPE_MODE:mode,STRIPE_SECRET_KEY:`sk_${mode}_fixture`,STRIPE_WEBHOOK_SECRET:"whsec_fixture",CLIENT_URL:"https://frontend.fixture.invalid"};
+    assert.deepEqual(stripeReadiness(settings),{configured:true,mode,testMode:mode==="test"});assert.doesNotThrow(()=>validateStripeStartup(settings));
+    for (const key of [`sk_${mode==="test"?"live":"test"}_fixture`,"pk_live_fixture","sk_org_fixture","rk_live_fixture"]) {const invalid={...settings,STRIPE_SECRET_KEY:key};assert.equal(stripeReadiness(invalid).configured,false);assert.throws(()=>validateStripeStartup(invalid),/does not match/);}
+    assert.equal(stripeReadiness({...settings,STRIPE_WEBHOOK_SECRET:"whsec_REPLACE_PRIVATELY"}).configured,false);
+    assert.equal(stripeReadiness({...settings,STRIPE_WEBHOOK_SECRET:""}).configured,false);assert.doesNotThrow(()=>validateStripeStartup({...settings,STRIPE_WEBHOOK_SECRET:""}));
+    assert.equal(stripeReadiness({...settings,STRIPE_WEBHOOK_SECRET:"bad"}).configured,false);assert.throws(()=>validateStripeStartup({...settings,STRIPE_WEBHOOK_SECRET:"bad"}));
+    for (const origin of ["javascript:alert(1)","https://user@frontend.fixture.invalid","https://frontend.fixture.invalid/path","https://frontend.fixture.invalid?foo=bar","https://frontend.fixture.invalid/#fragment"]) assert.equal(stripeReadiness({...settings,CLIENT_URL:origin}).configured,false);
+    if(mode==="live")for(const origin of ["","http://localhost:5173","http://frontend.fixture.invalid"])assert.equal(stripeReadiness({...settings,CLIENT_URL:origin}).configured,false);
+  }
+  for(const mode of ["LIVE","sandbox","","false"]) {assert.equal(stripeReadiness({STRIPE_MODE:mode}).configured,false);assert.throws(()=>validateStripeStartup({STRIPE_MODE:mode}),/STRIPE_MODE/);}
+  assert.equal(stripeReadiness({STRIPE_SECRET_KEY:"sk_test_fixture",STRIPE_WEBHOOK_SECRET:"whsec_fixture"}).testMode,true);
   const client=new Stripe("sk_test_fixture",{apiVersion:STRIPE_API_VERSION});assert.equal(client.getApiField("version"),"2026-09-30.endive");
 });
 
-test("Stripe test payments, real signature/raw HTTP and MongoDB (all provider APIs mocked)", {timeout:120000}, async(t)=>{
-  process.env.NODE_ENV="test";process.env.STRIPE_SECRET_KEY="sk_test_"+crypto.randomBytes(20).toString("hex");process.env.STRIPE_WEBHOOK_SECRET="whsec_"+crypto.randomBytes(24).toString("hex");
+for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signature/raw HTTP and MongoDB (all provider APIs mocked)`, {timeout:120000}, async(t)=>{
+  const testMode = mode === "test", PaymentOrder = paymentOrderModel(mode), StripeEvent = stripeEventModel(mode);
+  process.env.STRIPE_MODE=mode;process.env.CLIENT_URL="https://frontend.fixture.invalid";
+  process.env.NODE_ENV="test";process.env.STRIPE_SECRET_KEY=`sk_${mode}_`+crypto.randomBytes(20).toString("hex");process.env.STRIPE_WEBHOOK_SECRET="whsec_"+crypto.randomBytes(24).toString("hex");
   await mongoose.connect(`mongodb://127.0.0.1:${process.env.TEST_MONGO_PORT||27018}/lms_test_payments_${crypto.randomBytes(6).toString("hex")}`,{serverSelectionTimeoutMS:5000});
   await Promise.all([User,Session,Course,Category,Module,Lesson,Enrollment,Progress,VideoAsset,CourseNote,PaymentOrder,StripeEvent,AuditEvent].map(m=>m.init()));
   const server=await new Promise(resolve=>{const s=app.listen(0,"127.0.0.1",()=>resolve(s));});const base=`http://127.0.0.1:${server.address().port}/api`;
@@ -39,8 +53,8 @@ test("Stripe test payments, real signature/raw HTTP and MongoDB (all provider AP
   const fake={checkout:{sessions:{create:async(params,options)=>{
     if(failCreate)throw new Error("mock outage");
     if(!creates.has(options.idempotencyKey)){
-      const id="cs_test_"+crypto.randomBytes(6).toString("hex");
-      const session={id,livemode:false,mode:params.mode,currency:"inr",amount_total:params.line_items[0].price_data.unit_amount,metadata:params.metadata,client_reference_id:params.client_reference_id,status:"open",payment_status:"unpaid",payment_intent:null,url:`https://checkout.stripe.com/c/pay/${id}`};sessions.set(id,session);creates.set(options.idempotencyKey,{params,session});
+      const id=`cs_${mode}_`+crypto.randomBytes(6).toString("hex");
+      const session={id,livemode:!testMode,mode:params.mode,currency:"inr",amount_total:params.line_items[0].price_data.unit_amount,metadata:params.metadata,client_reference_id:params.client_reference_id,status:"open",payment_status:"unpaid",payment_intent:null,url:`https://checkout.stripe.com/c/pay/${id}`};sessions.set(id,session);creates.set(options.idempotencyKey,{params,session});
     }
     await new Promise(r=>setTimeout(r,15));const session=creates.get(options.idempotencyKey).session;await beforeReturn?.(session);return structuredClone(session);
   },expire:async id=>{const s=sessions.get(id);assert.equal(s.payment_status,"unpaid");s.status="expired";return structuredClone(s);},retrieve:async id=>{if(failRead)throw new Error("mock unavailable");assert.ok(sessions.has(id));return structuredClone(sessions.get(id));}}},paymentIntents:{retrieve:async id=>{assert.ok(intents.has(id));return structuredClone(intents.get(id));}},disputes:{list:async({charge})=>({data:structuredClone(disputes.get(charge)||[])})},charges:{retrieve:async id=>{const intent=[...intents.values()].find(i=>i.latest_charge?.id===id);assert.ok(intent);return structuredClone(intent.latest_charge);}}};
@@ -53,11 +67,11 @@ test("Stripe test payments, real signature/raw HTTP and MongoDB (all provider AP
     const body=raw||JSON.stringify(event);const signature=Stripe.webhooks.generateTestHeaderString({payload:body,secret:bad?"whsec_wrong":process.env.STRIPE_WEBHOOK_SECRET,timestamp:Math.floor(Date.now()/1000)-(old?600:0)});
     const response=await fetch(base+"/payments/webhook",{method:"POST",headers:{"Content-Type":"application/json","Stripe-Signature":signature},body});return{status:response.status,body:await response.json()};
   };
-  const event=(type,object,created=Math.floor(Date.now()/1000))=>({id:"evt_"+crypto.randomBytes(8).toString("hex"),type,created,livemode:false,data:{object}});
+  const event=(type,object,created=Math.floor(Date.now()/1000))=>({id:"evt_"+crypto.randomBytes(8).toString("hex"),type,created,livemode:!testMode,data:{object}});
   const pay=order=>{
     const session=[...sessions.values()].find(s=>s.metadata.orderId===String(order._id));assert.ok(session);
-    const id="pi_"+crypto.randomBytes(6).toString("hex"),charge={id:"ch_"+crypto.randomBytes(6).toString("hex"),livemode:false,paid:true,status:"succeeded",amount:order.amountMinor,currency:"inr",amount_refunded:0,disputed:false,payment_intent:id};
-    intents.set(id,{id,livemode:false,status:"succeeded",currency:"inr",amount:order.amountMinor,metadata:session.metadata,latest_charge:charge});Object.assign(session,{status:"complete",payment_status:"paid",payment_intent:id});return session;
+    const id="pi_"+crypto.randomBytes(6).toString("hex"),charge={id:"ch_"+crypto.randomBytes(6).toString("hex"),livemode:!testMode,paid:true,status:"succeeded",amount:order.amountMinor,currency:"inr",amount_refunded:0,disputed:false,payment_intent:id};
+    intents.set(id,{id,livemode:!testMode,status:"succeeded",currency:"inr",amount:order.amountMinor,metadata:session.metadata,latest_charge:charge});Object.assign(session,{status:"complete",payment_status:"paid",payment_intent:id});return session;
   };
   const users={};let course,videoLesson,textLesson,note,freeCourse,orderId;
   const create=async(user="student",key=crypto.randomUUID(),quoted=12345,extra={})=>call("/payments/checkout",users[user].cookie,"POST",{courseId:String(course._id),quotedAmountMinor:quoted,...extra},{"Idempotency-Key":key});
@@ -86,6 +100,20 @@ test("Stripe test payments, real signature/raw HTTP and MongoDB (all provider AP
       assert.equal((await call("/payments/checkout",null,"POST",{})).status,401);
       const slug=(await call(`/courses/${course.slug}`,users.student.cookie));assert.equal(slug.status,402);assert.equal(slug.body.courseId,String(course._id));
     });
+    await t.test("test/live records, entitlements and event IDs remain isolated without migrating existing data",async()=>{
+      const otherMode=testMode ? "live" : "test", OtherOrder=paymentOrderModel(otherMode), OtherEvent=stripeEventModel(otherMode);
+      await Promise.all([OtherOrder.init(),OtherEvent.init()]);
+      const foreign=await OtherOrder.create({student:users.student.id,course:course._id,instructor:users.teacher.id,title:course.title,amountMinor:12345,requestKey:"other-mode-pending",checkoutExpiresAt:new Date(Date.now()+3600000)});
+      await OtherOrder.create({student:users.student.id,course:course._id,instructor:users.teacher.id,title:course.title,amountMinor:12345,requestKey:"other-mode-paid",status:"paid",active:false,checkoutExpiresAt:new Date(Date.now()+3600000)});
+      await access(402);
+      const quote=(await call(`/payments/courses/${course._id}/quote`,users.student.cookie)).body.data.quote;assert.equal(quote.paid,false);assert.equal(quote.testMode,testMode);assert.equal(quote.pendingOrderId,undefined);
+      assert.equal((await call(`/payments/orders/${foreign._id}`,users.student.cookie)).status,404);
+      assert.equal((await call(`/payments/orders/${foreign._id}/refresh`,users.student.cookie,"POST",{})).status,404);
+      const sameEvent=event("checkout.session.completed",{id:`cs_${mode}_unrelated`});
+      await OtherEvent.create({_id:sameEvent.id,type:sameEvent.type,status:"processed"});
+      const answer=await webhook(sameEvent);assert.equal(answer.status,200);assert.equal(answer.body.duplicate,undefined);assert.equal(answer.body.ignored,true);
+      assert.equal(await OtherOrder.countDocuments({}),2);assert.equal(foreign.testMode,!testMode);
+    });
     await t.test("instructor price authority, exact paise, currency/destination spoofing ignored; unready/archived blocked",async()=>{
       assert.equal((await call(`/courses/${course._id}`,users.other.cookie,"PATCH",{price:10})).status,403);
       for(const price of ["1.001",-1,"1e4",0.49])assert.equal((await call(`/courses/${course._id}`,users.teacher.cookie,"PATCH",{price})).status,400);
@@ -104,9 +132,9 @@ test("Stripe test payments, real signature/raw HTTP and MongoDB (all provider AP
     await t.test("real raw-body signatures reject forged/expired/modified/live/Connect events and oversized JSON",async()=>{
       const raw=event("checkout.session.completed",[...sessions.values()][0]);
       assert.equal((await webhook(raw,{bad:true})).status,400);assert.equal((await webhook(raw,{old:true})).status,400);
-      assert.equal((await webhook({...raw,livemode:true})).status,400);assert.equal((await webhook({...raw,account:"acct_other"})).status,400);
-      assert.equal((await webhook(raw,{raw:"x".repeat(256*1024+1)})).status,413);assert.equal(await StripeEvent.countDocuments({}),0);
-      const key=process.env.STRIPE_SECRET_KEY;process.env.STRIPE_SECRET_KEY="sk_live_fixture";assert.equal((await create()).status,503);process.env.STRIPE_SECRET_KEY=key;
+      assert.equal((await webhook({...raw,livemode:testMode})).status,400);assert.equal((await webhook({...raw,account:"acct_other"})).status,400);
+      assert.equal((await webhook(raw,{raw:"x".repeat(256*1024+1)})).status,413);assert.equal(await StripeEvent.countDocuments({}),1);
+      const key=process.env.STRIPE_SECRET_KEY;process.env.STRIPE_SECRET_KEY=`sk_${testMode ? "live" : "test"}_fixture`;assert.equal((await create()).status,503);process.env.STRIPE_SECRET_KEY=key;
       await access(402);
     });
     await t.test("success URL and unpaid completion do not grant access; signed payment grants only nominated account",async()=>{
@@ -122,6 +150,10 @@ test("Stripe test payments, real signature/raw HTTP and MongoDB (all provider AP
     });
     await t.test("failed processing is retryable; mismatched amount/metadata cannot grant access; per-order event lease handles races",async()=>{
       const secondOrder=await PaymentOrder.findOne({student:users.second.id});const session=pay(secondOrder),evt=event("checkout.session.completed",session);
+      const intent=intents.get(session.payment_intent), charge=intent.latest_charge;
+      for (const object of [session,intent,charge]) {
+        object.livemode=testMode;assert.equal((await webhook(event("checkout.session.completed",session))).status,409);await access(402,"second");object.livemode=!testMode;
+      }
       failRead=true;assert.equal((await webhook(evt)).status,500);failRead=false;assert.equal((await webhook(evt)).status,200);await access(200,"second");
       session.amount_total=1;assert.equal((await webhook(event("checkout.session.completed",session))).status,409);session.amount_total=secondOrder.amountMinor;
       const results=await Promise.all([webhook(event("payment_intent.succeeded",intents.get(session.payment_intent))),webhook(event("checkout.session.completed",session))]);assert.ok(results.every(r=>[200,503].includes(r.status)));assert.ok(results.some(r=>r.status===200));
@@ -135,7 +167,7 @@ test("Stripe test payments, real signature/raw HTTP and MongoDB (all provider AP
       const dashboard=(await call("/enrollments/me",users.student.cookie)).body.data.enrollments;assert.equal(dashboard.length,2);assert.equal(dashboard.find(e=>e.course._id===String(course._id)).course.payment.required,true);assert.equal(dashboard.find(e=>e.course._id===String(course._id)).course.payment.status,"partially_refunded");
       charge.amount_refunded=12345;assert.equal((await webhook(event("charge.refunded",charge))).status,200);assert.equal((await PaymentOrder.findById(orderId)).status,"refunded");
       assert.equal((await webhook(event("checkout.session.completed",session))).status,200);await access(402);
-      charge.amount_refunded=0;charge.disputed=true;disputes.set(charge.id,[{id:"dp_fixture",status:"needs_response"}]);assert.equal((await webhook(event("charge.dispute.created",{id:"dp_fixture",charge:charge.id,payment_intent:session.payment_intent}))).status,200);assert.equal((await PaymentOrder.findById(orderId)).status,"disputed");await access(402);
+      charge.amount_refunded=0;charge.disputed=true;disputes.set(charge.id,[{id:"dp_fixture",livemode:!testMode,charge:charge.id,payment_intent:intent.id,status:"needs_response"}]);assert.equal((await webhook(event("charge.dispute.created",{id:"dp_fixture",charge:charge.id,payment_intent:session.payment_intent}))).status,200);assert.equal((await PaymentOrder.findById(orderId)).status,"disputed");await access(402);
       disputes.get(charge.id)[0].status="lost";assert.equal((await webhook(event("charge.dispute.closed",{id:"dp_fixture",charge:charge.id,payment_intent:session.payment_intent}))).status,200);assert.equal((await PaymentOrder.findById(orderId)).status,"reversed");
       disputes.get(charge.id)[0].status="won";assert.equal((await webhook(event("charge.dispute.closed",{id:"dp_fixture",charge:charge.id,payment_intent:session.payment_intent}))).status,200);await access(200);
     });
@@ -155,9 +187,13 @@ test("Stripe test payments, real signature/raw HTTP and MongoDB (all provider AP
       await Course.updateOne({_id:course._id},{archivedAt:null,isPublished:true});
       const retry=await create("race");assert.equal(retry.status,201);assert.notEqual(retry.body.data.order.id,String(saved._id));
       const row=await PaymentOrder.findById(retry.body.data.order.id).select("+stripeSessionId");const session=sessions.get(row.stripeSessionId);
-      const id="pi_failure";session.payment_intent=id;intents.set(id,{id,livemode:false,status:"requires_payment_method",amount:12345,currency:"inr",metadata:session.metadata,last_payment_error:{code:"card_declined"},latest_charge:null});
+      const id="pi_failure";session.payment_intent=id;intents.set(id,{id,livemode:!testMode,status:"requires_payment_method",amount:12345,currency:"inr",metadata:session.metadata,last_payment_error:{code:"card_declined"},latest_charge:null});
       assert.equal((await webhook(event("payment_intent.payment_failed",intents.get(id)))).status,200);assert.equal((await PaymentOrder.findById(row._id)).status,"failed");
-      const unrelated=event("customer.created",{id:"cus_unrelated"});assert.equal((await webhook(unrelated)).body.ignored,true);
+      const count=await StripeEvent.countDocuments({});
+      for (const type of ["customer.created","checkout.session.created","payment_intent.created","charge.succeeded","charge.updated","charge.captured"]) {
+        const unrelated=event(type,{id:"unrelated"});const ignored=await webhook(unrelated);assert.equal(ignored.status,200);assert.equal(ignored.body.ignored,true);
+      }
+      assert.equal(await StripeEvent.countDocuments({}),count);
     });
     await t.test("payment never creates nomination or reopens archive/unpublished/suspended access; paid progress retained",async()=>{
       const progress=await Progress.findOne({student:users.student.id,course:course._id});assert.ok(progress);
@@ -170,6 +206,6 @@ test("Stripe test payments, real signature/raw HTTP and MongoDB (all provider AP
     });
   }finally{
     await new Promise(resolve=>server.close(resolve));delete app.locals.stripeClient;delete app.locals.directVideoStore;delete app.locals.courseNoteStore;
-    assert.match(mongoose.connection.name,/^lms_test_payments_/);await mongoose.connection.dropDatabase();await mongoose.disconnect();delete process.env.STRIPE_SECRET_KEY;delete process.env.STRIPE_WEBHOOK_SECRET;
+    assert.match(mongoose.connection.name,/^lms_test_payments_/);await mongoose.connection.dropDatabase();await mongoose.disconnect();delete process.env.STRIPE_MODE;delete process.env.CLIENT_URL;delete process.env.STRIPE_SECRET_KEY;delete process.env.STRIPE_WEBHOOK_SECRET;
   }
 });
