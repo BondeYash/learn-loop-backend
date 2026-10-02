@@ -16,6 +16,8 @@ import categoryRoutes from "./routes/categoryRoutes.js";
 import learningRoutes from "./routes/learningRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import { auditAdminMutations } from "./middleware/adminAudit.js";
+import paymentRoutes from "./routes/paymentRoutes.js";
+import { stripeWebhook } from "./controllers/paymentController.js";
 
 const app = express();
 const clientOrigin = process.env.CLIENT_URL || "http://localhost:5173";
@@ -44,6 +46,9 @@ app.use("/api", (req, res, next) => {
   if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && ((req.headers.origin && !allowedOrigins.has(req.headers.origin)) || req.headers["sec-fetch-site"] === "cross-site")) return res.status(403).json({ success: false, message: "Request origin is not allowed" });
   next();
 });
+// Exact endpoint only: Stripe signs the untouched bytes. This runs before JSON,
+// cookie/session parsing and sanitizers, and authenticates with Stripe's signature.
+app.post("/api/payments/webhook", express.raw({ type: "application/json", limit: "256kb" }), stripeWebhook);
 // ---- Body parsing & logging ----
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
@@ -65,6 +70,7 @@ app.get("/api/health", (req, res) => {
 // ---- API routes ----
 app.use("/api", auditAdminMutations);
 app.use("/api/admin", adminRoutes);
+app.use("/api/payments", paymentRoutes);
 app.use("/api", videoRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/courses", courseRoutes);

@@ -1,0 +1,14 @@
+import { Router } from "express";
+import { body, param } from "express-validator";
+import { protect, authorize } from "../middleware/auth.js";
+import { validate } from "../validators/authValidators.js";
+import { checkout, orderStatus, paymentQuote, refreshOrderStatus } from "../controllers/paymentController.js";
+import rateLimit from "express-rate-limit";
+const router = Router();
+router.use(protect, authorize("student"));
+const providerLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, keyGenerator: (req) => `payment:${req.user._id}`, standardHeaders: true, legacyHeaders: false, message: { success: false, message: "Too many payment attempts. Wait a few minutes before retrying." } });
+router.get("/courses/:courseId/quote", param("courseId").isMongoId(), validate, paymentQuote);
+router.post("/checkout", providerLimiter, body("courseId").isMongoId(), body("quotedAmountMinor").isInt({ min: 50, max: 99999999 }).toInt(), validate, checkout);
+router.get("/orders/:orderId", param("orderId").isMongoId(), validate, orderStatus);
+router.post("/orders/:orderId/refresh", providerLimiter, param("orderId").isMongoId(), validate, refreshOrderStatus);
+export default router;

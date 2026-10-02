@@ -7,6 +7,8 @@ import { checkObjectStore } from "./services/videoObjectStore.js";
 import mongoose from "mongoose";
 import Category from "./models/Category.js";
 import CourseNote from "./models/CourseNote.js";
+import PaymentOrder from "./models/PaymentOrder.js";
+import StripeEvent from "./models/StripeEvent.js";
 
 const PORT = process.env.PORT || 5000;
 
@@ -14,6 +16,8 @@ const startServer = async () => {
   await connectDB();
   await checkObjectStore();
   await CourseNote.init();
+  await Promise.all([PaymentOrder.init(), StripeEvent.init()]);
+  if (process.env.STRIPE_SECRET_KEY && !process.env.STRIPE_SECRET_KEY.startsWith("sk_test_")) throw new Error("Live Stripe keys are disabled; use an sk_test_ key.");
   await Category.updateOne({ slug: "general" }, { $setOnInsert: { name: "General", slug: "general" } }, { upsert: true });
   let stopWorker = () => {};
   if (process.env.ENABLE_LEGACY_VIDEO_WORKER === "true") {

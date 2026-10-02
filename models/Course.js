@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import slugify from "slugify";
+import { rupeesToMinor } from "../services/coursePricing.js";
 
 const thumbnailSchema = new mongoose.Schema({ url: { type: String, default: "" }, publicId: { type: String, default: "" }, objectKey: { type: String, select: false }, storageBucket: { type: String, select: false }, size: { type: Number, select: false }, width: Number, height: Number }, { _id: false });
 const courseSchema = new mongoose.Schema({
@@ -9,7 +10,7 @@ const courseSchema = new mongoose.Schema({
   instructor: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
   category: { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: [true, "Course category is required"], index: true },
   thumbnail: { type: thumbnailSchema, default: () => ({}) },
-  price: { type: Number, default: 0, min: 0 },
+  price: { type: Number, default: 0, min: 0, max: 999999.99, validate: { validator: (value) => { rupeesToMinor(value); return true; }, message: "Use INR 0 or a price from 0.50 to 999999.99, with at most two decimals." } },
   level: { type: String, enum: ["beginner", "intermediate", "advanced"], default: "beginner" },
   language: { type: String, trim: true, default: "English", maxlength: 50 },
   requirements: [{ type: String, trim: true, maxlength: 300 }],

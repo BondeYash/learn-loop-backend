@@ -50,6 +50,7 @@ const errorHandler = (err, req, res, next) => {
   const response = {
     success: false,
     message: error.message,
+    ...(error.code === "PAYMENT_REQUIRED" ? { code: error.code, courseId: error.courseId } : {}),
     ...(error.errors?.length ? { errors: error.errors } : {}),
     ...(process.env.NODE_ENV === "development" ? { stack: err.stack } : {}),
   };

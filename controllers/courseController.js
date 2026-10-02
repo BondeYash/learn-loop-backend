@@ -10,6 +10,7 @@ import Module from "../models/Module.js";
 import Lesson from "../models/Lesson.js";
 import { ensureCourseReady } from "../services/courseReadiness.js";
 import { archiveCourse, restoreCourse, courseCurriculum, ensureCategory, requireCourseOwner } from "../services/courseService.js";
+import { withCoursePayments } from "../services/coursePayments.js";
 
 const allowedFields = ["title", "description", "category", "price", "level", "language", "requirements", "learningOutcomes"];
 const pickCourseFields = (body) => Object.fromEntries(allowedFields.filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
@@ -22,7 +23,7 @@ export const listCourses = asyncHandler(async (req, res) => {
   }
   filter.archivedAt = null;
   const courses = await Course.find(filter).populate("instructor", "name avatar").populate("category", "name slug").sort("-publishedAt");
-  return new ApiResponse(res, 200, "Courses retrieved", { courses });
+  return new ApiResponse(res, 200, "Courses retrieved", { courses: req.user.role === "student" ? await withCoursePayments(courses, req.user._id) : courses });
 });
 export const getCourse = asyncHandler(async (req, res) => {
   const identifiers = [{ slug: req.params.id }];
