@@ -5,7 +5,7 @@ import mongoose from "mongoose";
 import Course from "../models/Course.js";
 import Enrollment from "../models/Enrollment.js";
 import VideoAsset from "../models/VideoAsset.js";
-import { requireCourseAccess } from "../services/courseAccess.js";
+import { catalogOutline, managesCourse, requireCourseAccess } from "../services/courseAccess.js";
 import Module from "../models/Module.js";
 import Lesson from "../models/Lesson.js";
 import { ensureCourseReady } from "../services/courseReadiness.js";
@@ -17,23 +17,39 @@ const pickCourseFields = (body) => Object.fromEntries(allowedFields.filter((fiel
 
 export const listCourses = asyncHandler(async (req, res) => {
   let filter = req.user.role === "admin" ? {} : { instructor: req.user._id };
+  let assignments = [];
   if (req.user.role === "student") {
-    const assignments = await Enrollment.find({ student: req.user._id, assignedBy: { $exists: true } }).select("course");
-    filter = { isPublished: true, _id: { $in: assignments.map((a) => a.course) } };
+    assignments = await Enrollment.find({ student: req.user._id, assignedBy: { $exists: true } }).select("course status");
+    filter = { isPublished: true };
   }
   filter.archivedAt = null;
   const courses = await Course.find(filter).populate("instructor", "name avatar").populate("category", "name slug").sort("-publishedAt");
-  return new ApiResponse(res, 200, "Courses retrieved", { courses: req.user.role === "student" ? await withCoursePayments(courses, req.user._id) : courses });
+  if (req.user.role !== "student") return new ApiResponse(res, 200, "Courses retrieved", { courses });
+  const assigned = new Map(assignments.map((item) => [String(item.course), item.status]));
+  const withPayments = await withCoursePayments(courses, req.user._id);
+  return new ApiResponse(res, 200, "Courses retrieved", { courses: withPayments.map((course) => {
+    const status = assigned.get(String(course._id)) || null;
+    return { ...course, access: { assigned: Boolean(status), videos: Boolean(status) && !course.payment.required, status } };
+  }) });
 });
 export const getCourse = asyncHandler(async (req, res) => {
   const identifiers = [{ slug: req.params.id }];
   if (mongoose.isValidObjectId(req.params.id)) identifiers.unshift({ _id: req.params.id });
   const course = await Course.findOne({ $or: identifiers }).populate("instructor", "name avatar bio").populate("category", "name slug");
   if (!course) throw new ApiError(404, "Course not found");
+  if (course.archivedAt) throw new ApiError(410, "This course has been archived and is unavailable.");
+  if (managesCourse(course, req.user)) {
+    return new ApiResponse(res, 200, "Course retrieved", { course, modules: await courseCurriculum(course._id), access: { assigned: true, videos: true } });
+  }
+  if (req.user.role !== "student" || !course.isPublished) throw new ApiError(403, "This course is not assigned to your account or is not published.");
+  const assigned = Boolean(await Enrollment.exists({ student: req.user._id, course: course._id, assignedBy: { $exists: true } }));
+  if (!assigned) {
+    return new ApiResponse(res, 200, "Course retrieved", { course, modules: catalogOutline(await courseCurriculum(course._id)), access: { assigned: false, videos: false } });
+  }
   await requireCourseAccess(course._id, req.user);
   const modules = await courseCurriculum(course._id);
-  if (req.user.role === "student") for (const module of modules) module.lessons = module.lessons.filter((lesson) => lesson.contentType === "text" || lesson.video?.status === "ready");
-  return new ApiResponse(res, 200, "Course retrieved", { course, modules });
+  for (const module of modules) module.lessons = module.lessons.filter((lesson) => lesson.contentType === "text" || lesson.video?.status === "ready");
+  return new ApiResponse(res, 200, "Course retrieved", { course, modules, access: { assigned: true, videos: true } });
 });
 export const myCourses = asyncHandler(async (req, res) => {
   const filter = { ...(req.user.role === "admin" ? {} : { instructor: req.user._id }), archivedAt: req.query.archived === "true" ? { $ne: null } : null };

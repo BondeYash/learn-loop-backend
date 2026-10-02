@@ -90,7 +90,10 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
   const create=async(user="student",key=crypto.randomUUID(),quoted=12345,extra={})=>call("/payments/checkout",users[user].cookie,"POST",{courseId:String(course._id),quotedAmountMinor:quoted,...extra},{"Idempotency-Key":key});
   const access=async(expected,user="student")=>{
     for(const [path,method,body] of [[`/courses/${course._id}`,"GET"],[`/lessons/${videoLesson._id}/playback`,"GET"],[`/courses/${course._id}/notes`,"GET"],[`/courses/${course._id}/notes/${note._id}/url`,"GET"],[`/courses/${course._id}/progress`,"GET"],[`/lessons/${textLesson._id}/complete`,"POST",{}]]){
-      const r=await call(path,users[user].cookie,method,body);assert.equal(r.status,users[user].role!=="student" && (path.endsWith("/progress")||path.endsWith("/complete")) ? 403 : expected,`${method} ${path}: ${JSON.stringify(r.body)}`);
+      const r=await call(path,users[user].cookie,method,body);
+      const catalog=method==="GET"&&path===`/courses/${course._id}`&&users[user].role==="student"&&expected===403;
+      assert.equal(r.status,catalog?200:users[user].role!=="student"&&(path.endsWith("/progress")||path.endsWith("/complete"))?403:expected,`${method} ${path}: ${JSON.stringify(r.body)}`);
+      if(catalog){assert.equal(r.body.data.access.assigned,false);assert.equal(r.body.data.access.videos,false);assert.equal(JSON.stringify(r.body).includes("Private course content"),false);assert.ok(r.body.data.modules.flatMap(m=>m.lessons).every(l=>!l.content&&!l.video));}
     }
   };
   try{
@@ -105,8 +108,9 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
     await Enrollment.create([{student:users.student.id,course:course._id,assignedBy:users.teacher.id},{student:users.second.id,course:course._id,assignedBy:users.teacher.id},{student:users.student.id,course:freeCourse._id,assignedBy:users.teacher.id}]);
     await t.test("assignment never waives paid access; free courses and owner/admin previews preserved",async()=>{
       await access(402);await access(200,"teacher");await access(200,"admin");await access(403,"stranger");
-      const listed=(await call("/courses",users.student.cookie)).body.data.courses;assert.equal(listed.length,2);assert.equal(listed.find(c=>c._id===String(course._id)).payment.required,true);assert.equal(listed.find(c=>c._id===String(freeCourse._id)).payment.status,"free");
-      const assigned=(await call("/enrollments/me",users.student.cookie)).body.data.enrollments;assert.equal(assigned.length,2);assert.equal(assigned.find(e=>e.course._id===String(course._id)).course.payment.status,"required");assert.equal((await call("/courses",users.stranger.cookie)).body.data.courses.length,0);
+      const listed=(await call("/courses",users.student.cookie)).body.data.courses;assert.equal(listed.length,2);assert.equal(listed.find(c=>c._id===String(course._id)).payment.required,true);assert.equal(listed.find(c=>c._id===String(course._id)).access.videos,false);assert.equal(listed.find(c=>c._id===String(freeCourse._id)).payment.status,"free");assert.equal(listed.find(c=>c._id===String(freeCourse._id)).access.videos,true);
+      const assigned=(await call("/enrollments/me",users.student.cookie)).body.data.enrollments;assert.equal(assigned.length,2);assert.equal(assigned.find(e=>e.course._id===String(course._id)).course.payment.status,"required");
+      const visible=(await call("/courses",users.stranger.cookie)).body.data.courses;assert.equal(visible.length,2);assert.ok(visible.every(c=>c.access.assigned===false&&c.access.videos===false));
       assert.equal((await call(`/courses/${freeCourse._id}`,users.student.cookie)).status,200);
       assert.equal((await call(`/payments/courses/${course._id}/quote`,users.stranger.cookie)).status,403);
       assert.equal((await create("teacher")).status,403);

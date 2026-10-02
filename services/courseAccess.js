@@ -4,6 +4,16 @@ import ApiError from "../utils/ApiError.js";
 import { paymentOrderModel } from "../models/PaymentOrder.js";
 import { stripeMode } from "./stripeMode.js";
 export const managesCourse = (course, user) => user.role === "admin" || (user.role === "instructor" && String(course.instructor._id || course.instructor) === String(user._id));
+// Published courses are visible to every student. Lesson media, notes and
+// progress stay behind an instructor assignment (and payment, when priced).
+export function catalogOutline(modules) {
+  return modules.map((module) => ({
+    _id: module._id,
+    title: module.title,
+    order: module.order,
+    lessons: module.lessons.map((lesson) => ({ _id: lesson._id, title: lesson.title, contentType: lesson.contentType, order: lesson.order, locked: true })),
+  }));
+}
 export async function requireCourseNomination(courseId, user) {
   const course = await Course.findById(courseId);
   if (!course) throw new ApiError(404, "Course not found");

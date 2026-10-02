@@ -156,8 +156,16 @@ test("Real MongoDB + HTTP + FFmpeg integration", { timeout: 120_000 }, async (t)
       assert.equal((await call(media, { method: "HEAD", cookie: student.cookie })).status, 200);
       assert.equal((await call(`/lessons/${lessonId}/complete`, { method: "POST", cookie: student.cookie })).json.data.progress.percentage, 100);
       assert.equal((await call(`/courses/${courseId}/assignments/${otherStudent.user.id}`, { method: "DELETE", cookie: teacher.cookie })).status, 200);
-      for (const url of [media, `/courses/${courseId}`, `/courses/${courseId}/progress`]) assert.equal((await call(url, { cookie: otherStudent.cookie })).status, 403);
-      assert.deepEqual((await call("/courses", { cookie: otherStudent.cookie })).json.data.courses, []);
+      assert.equal((await call(media, { cookie: otherStudent.cookie })).status, 403);
+      assert.equal((await call(`/courses/${courseId}/progress`, { cookie: otherStudent.cookie })).status, 403);
+      const preview = await call(`/courses/${courseId}`, { cookie: otherStudent.cookie });
+      assert.equal(preview.status, 200);
+      assert.equal(preview.json.data.access.videos, false);
+      assert.ok(preview.json.data.modules.flatMap((module) => module.lessons).every((lesson) => lesson.locked && !lesson.video));
+      const listed = (await call("/courses", { cookie: otherStudent.cookie })).json.data.courses;
+      assert.equal(listed.length, 1);
+      assert.equal(listed[0].access.assigned, false);
+      assert.equal(listed[0].access.videos, false);
       assert.equal((await call(`/lessons/${lessonId}/complete`, { method: "POST", cookie: otherStudent.cookie })).status, 403);
     });
     await t.test("missing storage returns a retryable error without leaking media", async () => {
