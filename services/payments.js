@@ -45,7 +45,7 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   if (!order) {
     if (quotedAmountMinor !== amountMinor) throw new ApiError(409, "The course price changed. Refresh the price before paying.");
     try {
-      order = await PaymentOrder.findOneAndUpdate({ student: user._id, requestKey: hash, testMode }, { $setOnInsert: { course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", checkoutExpiresAt: new Date(Date.now() + 31 * 60 * 1000) } }, { upsert: true, new: true, runValidators: true }).select(SESSION_FIELDS);
+      order = await PaymentOrder.findOneAndUpdate({ student: user._id, requestKey: hash, testMode }, { $setOnInsert: { course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", checkoutExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) } }, { upsert: true, new: true, runValidators: true }).select(SESSION_FIELDS);
     } catch (error) {
       if (error.code !== 11000) throw error;
       order = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode }).select(SESSION_FIELDS);
@@ -53,19 +53,21 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   }
   if (!order || String(order.course) !== String(course._id)) throw new ApiError(409, "This checkout attempt belongs to another course.");
   if (quotedAmountMinor !== order.amountMinor) throw new ApiError(409, "An existing checkout uses an earlier course price. Refresh its payment status before continuing.");
-  if (order.checkoutExpiresAt < new Date()) throw new ApiError(409, "This checkout attempt expired. Start a new attempt.");
+  if (order.stripeSessionId && order.checkoutExpiresAt < new Date()) throw new ApiError(409, "This checkout attempt expired. Start a new attempt.");
   if (["paid", "refunded", "partially_refunded", "disputed", "reversed"].includes(order.status)) throw new ApiError(409, "This payment has finished or needs review. Refresh its status before starting another.");
   if (order.checkoutUrl) return { order: publicOrder(order), url: order.checkoutUrl };
   const metadata = { orderId: String(order._id), studentId: String(order.student), courseId: String(order.course) };
   let session;
   try {
-    session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], client_reference_id: String(order._id), metadata, payment_intent_data: { metadata }, line_items: [{ quantity: 1, price_data: { currency: "inr", unit_amount: order.amountMinor, product_data: { name: order.title } } }], success_url: `${origin.origin}/payments/${order._id}?checkout=success`, cancel_url: `${origin.origin}/payments/${order._id}?checkout=canceled`, expires_at: Math.floor(order.checkoutExpiresAt.getTime() / 1000) }, { idempotencyKey: `lessonloop-${mode}-checkout-${order._id}` });
+    // Let Stripe select eligible methods from this account's Dashboard settings.
+    // Do not force a static list or accept method overrides from the browser.
+    session = await stripe.checkout.sessions.create({ mode: "payment", client_reference_id: String(order._id), metadata, payment_intent_data: { metadata }, line_items: [{ quantity: 1, price_data: { currency: "inr", unit_amount: order.amountMinor, product_data: { name: order.title } } }], success_url: `${origin.origin}/payments/${order._id}?checkout=success`, cancel_url: `${origin.origin}/payments/${order._id}?checkout=canceled` }, { idempotencyKey: `lessonloop-${mode}-checkout-${order._id}` });
   } catch (error) {
     reportPaymentFailure(error, "checkout_create", mode);
     throw new ApiError(502, "Stripe checkout is temporarily unavailable. Retry this same payment attempt.");
   }
-  if (session.livemode !== !testMode || !trustedCheckoutUrl(session.url) || !session.id?.startsWith(`cs_${mode}_`)) throw new ApiError(502, "Stripe did not return a valid checkout session for this mode.");
-  const saved = await PaymentOrder.findOneAndUpdate({ _id: order._id, $or: [{ stripeSessionId: { $exists: false } }, { stripeSessionId: session.id }] }, { $set: { stripeSessionId: session.id, checkoutUrl: session.url } }, { new: true }).select(SESSION_FIELDS);
+  if (session.livemode !== !testMode || !trustedCheckoutUrl(session.url) || !session.id?.startsWith(`cs_${mode}_`) || !Number.isSafeInteger(session.expires_at) || session.expires_at <= Math.floor(Date.now() / 1000)) throw new ApiError(502, "Stripe did not return a valid checkout session for this mode.");
+  const saved = await PaymentOrder.findOneAndUpdate({ _id: order._id, $or: [{ stripeSessionId: { $exists: false } }, { stripeSessionId: session.id }] }, { $set: { stripeSessionId: session.id, checkoutUrl: session.url, checkoutExpiresAt: new Date(session.expires_at * 1000) } }, { new: true }).select(SESSION_FIELDS);
   if (!saved) throw new ApiError(409, "The payment attempt changed. Refresh before paying.");
   try {
     const current = await requireCourseNomination(course._id, user);

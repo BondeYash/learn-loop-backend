@@ -52,10 +52,11 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
   const sessions=new Map(), intents=new Map(), disputes=new Map(), creates=new Map();let failCreate=false, failRead=false, beforeReturn;
   const createError=new Stripe.errors.StripeInvalidRequestError({code:"parameter_missing",param:"customer",statusCode:400,requestId:"req_fixtureCreate",message:"fixture-private-provider-message",headers:{authorization:"fixture-private-authorization"}});
   const fake={checkout:{sessions:{create:async(params,options)=>{
+    if (Object.hasOwn(params,"payment_method_types")) throw new Stripe.errors.StripeInvalidRequestError({param:"payment_method_types",statusCode:400,requestId:"req_fixtureRejectedMethods",message:"Synthetic account rejects a forced method list"});
     if(failCreate)throw createError;
     if(!creates.has(options.idempotencyKey)){
       const id=`cs_${mode}_`+crypto.randomBytes(6).toString("hex");
-      const session={id,livemode:!testMode,mode:params.mode,currency:"inr",amount_total:params.line_items[0].price_data.unit_amount,metadata:params.metadata,client_reference_id:params.client_reference_id,status:"open",payment_status:"unpaid",payment_intent:null,url:`https://checkout.stripe.com/c/pay/${id}`};sessions.set(id,session);creates.set(options.idempotencyKey,{params,session});
+      const session={id,livemode:!testMode,mode:params.mode,currency:"inr",amount_total:params.line_items[0].price_data.unit_amount,metadata:params.metadata,client_reference_id:params.client_reference_id,status:"open",payment_status:"unpaid",payment_intent:null,expires_at:Math.floor(Date.now()/1000)+86400,url:`https://checkout.stripe.com/c/pay/${id}`};sessions.set(id,session);creates.set(options.idempotencyKey,{params,session});
     }
     await new Promise(r=>setTimeout(r,15));const session=creates.get(options.idempotencyKey).session;await beforeReturn?.(session);return structuredClone(session);
   },expire:async id=>{const s=sessions.get(id);assert.equal(s.payment_status,"unpaid");s.status="expired";return structuredClone(s);},retrieve:async id=>{if(failRead)throw new Error("mock unavailable");assert.ok(sessions.has(id));return structuredClone(sessions.get(id));}}},paymentIntents:{retrieve:async id=>{assert.ok(intents.has(id));return structuredClone(intents.get(id));}},disputes:{list:async({charge})=>({data:structuredClone(disputes.get(charge)||[])})},charges:{retrieve:async id=>{const intent=[...intents.values()].find(i=>i.latest_charge?.id===id);assert.ok(intent);return structuredClone(intent.latest_charge);}}};
@@ -78,12 +79,12 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
   const create=async(user="student",key=crypto.randomUUID(),quoted=12345,extra={})=>call("/payments/checkout",users[user].cookie,"POST",{courseId:String(course._id),quotedAmountMinor:quoted,...extra},{"Idempotency-Key":key});
   const access=async(expected,user="student")=>{
     for(const [path,method,body] of [[`/courses/${course._id}`,"GET"],[`/lessons/${videoLesson._id}/playback`,"GET"],[`/courses/${course._id}/notes`,"GET"],[`/courses/${course._id}/notes/${note._id}/url`,"GET"],[`/courses/${course._id}/progress`,"GET"],[`/lessons/${textLesson._id}/complete`,"POST",{}]]){
-      const r=await call(path,users[user].cookie,method,body);assert.equal(r.status,user!=="student" && user!=="second" && user!=="stranger" && (path.endsWith("/progress")||path.endsWith("/complete")) ? 403 : expected,`${method} ${path}: ${JSON.stringify(r.body)}`);
+      const r=await call(path,users[user].cookie,method,body);assert.equal(r.status,users[user].role!=="student" && (path.endsWith("/progress")||path.endsWith("/complete")) ? 403 : expected,`${method} ${path}: ${JSON.stringify(r.body)}`);
     }
   };
   try{
-    for(const [name,role] of [["teacher","instructor"],["other","instructor"],["admin","admin"],["student","student"],["stranger","student"],["second","student"],["race","student"],["early","student"]]){
-      const password=crypto.randomBytes(24).toString("hex"),user=await User.create({name,role,email:`${name}@fixture.invalid`,password});users[name]={id:user._id,cookie:(await call("/auth/login",null,"POST",{email:user.email,password})).cookie};
+    for(const [name,role] of [["teacher","instructor"],["other","instructor"],["admin","admin"],["student","student"],["stranger","student"],["second","student"],["race","student"],["early","student"],["delayed","student"],["delayedfail","student"]]){
+      const password=crypto.randomBytes(24).toString("hex"),user=await User.create({name,role,email:`${name}@fixture.invalid`,password});users[name]={id:user._id,role,cookie:(await call("/auth/login",null,"POST",{email:user.email,password})).cookie};
     }
     const category=await Category.create({name:"General"});course=await Course.create({title:"Paid assigned course",description:"Fixture",instructor:users.teacher.id,category:category._id,price:123.45,isPublished:true});
     freeCourse=await Course.create({title:"Existing free course",description:"Fixture",instructor:users.teacher.id,category:category._id,isPublished:true});
@@ -120,8 +121,10 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
       for(const price of ["1.001",-1,"1e4",0.49])assert.equal((await call(`/courses/${course._id}`,users.teacher.cookie,"PATCH",{price})).status,400);
       assert.equal((await create("student",crypto.randomUUID(),100)).status,409);
       assert.equal((await create("student","bad",12345)).status,400);
-      const made=await create("student",crypto.randomUUID(),12345,{amount:1,currency:"usd",student:users.stranger.id,destination:"acct_attacker"});assert.equal(made.status,201);orderId=made.body.data.order.id;
+      const made=await create("student",crypto.randomUUID(),12345,{amount:1,currency:"usd",student:users.stranger.id,destination:"acct_attacker",payment_method_types:["attacker_method"],allowed_payment_method_types:["attacker_method"],payment_method_configuration:"pmc_attacker"});assert.equal(made.status,201);orderId=made.body.data.order.id;
       const request=[...creates.values()][0].params;assert.equal(request.line_items[0].price_data.unit_amount,12345);assert.equal(request.line_items[0].price_data.currency,"inr");assert.equal(request.metadata.studentId,String(users.student.id));assert.equal(request.payment_intent_data.transfer_data,undefined);assert.equal(request.payment_intent_data.application_fee_amount,undefined);
+      assert.equal(Object.hasOwn(request,"payment_method_types"),false);assert.equal(request.allowed_payment_method_types,undefined);assert.equal(request.payment_method_configuration,undefined);
+      assert.equal(Object.hasOwn(request,"expires_at"),false);
       assert.match(request.success_url,/\/payments\/[a-f0-9]{24}\?checkout=success$/);
       assert.equal((await call(`/payments/orders/${orderId}`,users.stranger.cookie)).status,404);
     });
@@ -133,7 +136,9 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
         const failed=await create("second");assert.equal(failed.status,502);assert.doesNotMatch(JSON.stringify(failed.body),/fixture-private|req_fixtureCreate|parameter_missing/);
       } finally { console.error=previousLogger; }
       assert.deepEqual(JSON.parse(diagnosticLines[0]),{event:"stripe_payment_failure",operation:"checkout_create",mode,type:"StripeInvalidRequestError",code:"parameter_missing",status:400,requestId:"req_fixtureCreate",param:"customer"});
-      failCreate=false;const r=await create("second");assert.equal(r.status,201);assert.equal(await PaymentOrder.countDocuments({student:users.second.id}),1);
+      const failedOrder=await PaymentOrder.findOne({student:users.second.id});await PaymentOrder.updateOne({_id:failedOrder._id},{checkoutExpiresAt:new Date(0)});
+      failCreate=false;const r=await create("second");assert.equal(r.status,201);assert.equal(r.body.data.order.id,String(failedOrder._id));assert.equal(await PaymentOrder.countDocuments({student:users.second.id}),1);
+      const recovered=await PaymentOrder.findById(failedOrder._id).select("+stripeSessionId");assert.equal(recovered.checkoutExpiresAt.getTime(),sessions.get(recovered.stripeSessionId).expires_at*1000);
       await call(`/courses/${course._id}`,users.teacher.cookie,"PATCH",{price:199.99});assert.equal((await create("student",crypto.randomUUID(),19999)).status,409);const retry=await create();assert.equal(retry.body.data.order.amountMinor,12345);await call(`/courses/${course._id}`,users.teacher.cookie,"PATCH",{price:123.45});
     });
     await t.test("real raw-body signatures reject forged/expired/modified/live/Connect events and oversized JSON",async()=>{
@@ -177,6 +182,17 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
       charge.amount_refunded=0;charge.disputed=true;disputes.set(charge.id,[{id:"dp_fixture",livemode:!testMode,charge:charge.id,payment_intent:intent.id,status:"needs_response"}]);assert.equal((await webhook(event("charge.dispute.created",{id:"dp_fixture",charge:charge.id,payment_intent:session.payment_intent}))).status,200);assert.equal((await PaymentOrder.findById(orderId)).status,"disputed");await access(402);
       disputes.get(charge.id)[0].status="lost";assert.equal((await webhook(event("charge.dispute.closed",{id:"dp_fixture",charge:charge.id,payment_intent:session.payment_intent}))).status,200);assert.equal((await PaymentOrder.findById(orderId)).status,"reversed");
       disputes.get(charge.id)[0].status="won";assert.equal((await webhook(event("charge.dispute.closed",{id:"dp_fixture",charge:charge.id,payment_intent:session.payment_intent}))).status,200);await access(200);
+    });
+    await t.test("dynamic method completion remains locked while processing; async success/failure use canonical state",async()=>{
+      await Enrollment.create([{student:users.delayed.id,course:course._id,assignedBy:users.teacher.id},{student:users.delayedfail.id,course:course._id,assignedBy:users.teacher.id}]);
+      const made=await create("delayed");assert.equal(made.status,201);const row=await PaymentOrder.findById(made.body.data.order.id),session=pay(row),intent=intents.get(session.payment_intent),charge=intent.latest_charge;
+      session.payment_method_types=["fixture_delayed_method"];session.payment_status="unpaid";intent.status="processing";charge.paid=false;charge.status="pending";
+      assert.equal((await webhook(event("checkout.session.completed",session))).status,200);await access(402,"delayed");assert.equal((await PaymentOrder.findById(row._id)).status,"pending");
+      session.payment_status="paid";intent.status="succeeded";charge.paid=true;charge.status="succeeded";
+      const success=event("checkout.session.async_payment_succeeded",session);assert.equal((await webhook(success)).status,200);assert.equal((await webhook(success)).body.duplicate,true);await access(200,"delayed");
+      const failed=await create("delayedfail");assert.equal(failed.status,201);const failedOrder=await PaymentOrder.findById(failed.body.data.order.id),failedSession=pay(failedOrder),failedIntent=intents.get(failedSession.payment_intent);
+      failedSession.payment_status="unpaid";failedIntent.status="requires_payment_method";failedIntent.last_payment_error={code:"fixture_method_failed"};failedIntent.latest_charge=null;
+      assert.equal((await webhook(event("checkout.session.async_payment_failed",failedSession))).status,200);await access(402,"delayedfail");assert.equal((await PaymentOrder.findById(failedOrder._id)).status,"failed");
     });
     await t.test("webhook before session attachment, archive during creation, failure/expiry and duplicate identity guards",async()=>{
       await Enrollment.create([{student:users.early.id,course:course._id,assignedBy:users.teacher.id},{student:users.race.id,course:course._id,assignedBy:users.teacher.id}]);
