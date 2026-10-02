@@ -9,6 +9,7 @@ import { ensureCourseReady } from "./courseReadiness.js";
 import { rupeesToMinor } from "./coursePricing.js";
 import { requireStripeSettings, trustedCheckoutUrl, checkoutOrigin, assertStripeEventMode } from "./stripeClient.js";
 import { stripeMode } from "./stripeMode.js";
+import { reportPaymentFailure } from "./paymentDiagnostics.js";
 
 const SESSION_FIELDS = "+stripeSessionId +stripePaymentIntentId +checkoutUrl";
 const ref = (value) => typeof value === "string" ? value : value?.id;
@@ -59,7 +60,10 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   let session;
   try {
     session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], client_reference_id: String(order._id), metadata, payment_intent_data: { metadata }, line_items: [{ quantity: 1, price_data: { currency: "inr", unit_amount: order.amountMinor, product_data: { name: order.title } } }], success_url: `${origin.origin}/payments/${order._id}?checkout=success`, cancel_url: `${origin.origin}/payments/${order._id}?checkout=canceled`, expires_at: Math.floor(order.checkoutExpiresAt.getTime() / 1000) }, { idempotencyKey: `lessonloop-${mode}-checkout-${order._id}` });
-  } catch { throw new ApiError(502, "Stripe checkout is temporarily unavailable. Retry this same payment attempt."); }
+  } catch (error) {
+    reportPaymentFailure(error, "checkout_create", mode);
+    throw new ApiError(502, "Stripe checkout is temporarily unavailable. Retry this same payment attempt.");
+  }
   if (session.livemode !== !testMode || !trustedCheckoutUrl(session.url) || !session.id?.startsWith(`cs_${mode}_`)) throw new ApiError(502, "Stripe did not return a valid checkout session for this mode.");
   const saved = await PaymentOrder.findOneAndUpdate({ _id: order._id, $or: [{ stripeSessionId: { $exists: false } }, { stripeSessionId: session.id }] }, { $set: { stripeSessionId: session.id, checkoutUrl: session.url } }, { new: true }).select(SESSION_FIELDS);
   if (!saved) throw new ApiError(409, "The payment attempt changed. Refresh before paying.");

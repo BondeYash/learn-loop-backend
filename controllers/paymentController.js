@@ -4,6 +4,8 @@ import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { stripeClient, stripeReadiness, verifyStripeEvent } from "../services/stripeClient.js";
 import { handlePaymentEvent, publicOrder, quoteCourse, reconcileOrder, startCheckout } from "../services/payments.js";
+import { reportPaymentFailure } from "../services/paymentDiagnostics.js";
+import { stripeMode } from "../services/stripeMode.js";
 
 const clientFor = (req) => process.env.NODE_ENV === "test" && req.app.locals.stripeClient ? req.app.locals.stripeClient : stripeClient();
 export const paymentQuote = asyncHandler(async (req, res) => new ApiResponse(res, 200, "INR course price", { quote: await quoteCourse(req.params.courseId, req.user), readiness: stripeReadiness() }));
@@ -18,10 +20,12 @@ export const refreshOrderStatus = asyncHandler(async (req, res) => {
   if (!order) throw new ApiError(404, "Payment order not found");
   if (!order.stripeSessionId) throw new ApiError(409, "Checkout has not finished opening. Retry the original payment attempt.");
   try { return new ApiResponse(res, 200, "Verified Stripe payment status", { order: publicOrder(await reconcileOrder(order._id, null, clientFor(req))) }); }
-  catch (error) { if (error instanceof ApiError) throw error; throw new ApiError(502, "Stripe payment status is temporarily unavailable. Retry shortly."); }
+  catch (error) { if (error instanceof ApiError) throw error; reportPaymentFailure(error, "order_refresh", stripeMode()); throw new ApiError(502, "Stripe payment status is temporarily unavailable. Retry shortly."); }
 });
 export const stripeWebhook = asyncHandler(async (req, res) => {
   const event = verifyStripeEvent(req.body, req.get("Stripe-Signature"));
-  const result = await handlePaymentEvent(event, clientFor(req));
+  let result;
+  try { result = await handlePaymentEvent(event, clientFor(req)); }
+  catch (error) { if (!(error instanceof ApiError)) reportPaymentFailure(error, "webhook_reconcile", stripeMode()); throw error; }
   return res.status(200).json({ received: true, ...result });
 });

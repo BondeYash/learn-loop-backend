@@ -50,8 +50,9 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
   await Promise.all([User,Session,Course,Category,Module,Lesson,Enrollment,Progress,VideoAsset,CourseNote,PaymentOrder,StripeEvent,AuditEvent].map(m=>m.init()));
   const server=await new Promise(resolve=>{const s=app.listen(0,"127.0.0.1",()=>resolve(s));});const base=`http://127.0.0.1:${server.address().port}/api`;
   const sessions=new Map(), intents=new Map(), disputes=new Map(), creates=new Map();let failCreate=false, failRead=false, beforeReturn;
+  const createError=new Stripe.errors.StripeInvalidRequestError({code:"parameter_missing",param:"customer",statusCode:400,requestId:"req_fixtureCreate",message:"fixture-private-provider-message",headers:{authorization:"fixture-private-authorization"}});
   const fake={checkout:{sessions:{create:async(params,options)=>{
-    if(failCreate)throw new Error("mock outage");
+    if(failCreate)throw createError;
     if(!creates.has(options.idempotencyKey)){
       const id=`cs_${mode}_`+crypto.randomBytes(6).toString("hex");
       const session={id,livemode:!testMode,mode:params.mode,currency:"inr",amount_total:params.line_items[0].price_data.unit_amount,metadata:params.metadata,client_reference_id:params.client_reference_id,status:"open",payment_status:"unpaid",payment_intent:null,url:`https://checkout.stripe.com/c/pay/${id}`};sessions.set(id,session);creates.set(options.idempotencyKey,{params,session});
@@ -126,7 +127,13 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
     });
     await t.test("concurrent same/different keys reuse one checkout, API timeout retry same order and amount snapshot",async()=>{
       const results=await Promise.all([create(),create(),create()]);for(const r of results){assert.equal(r.status,201);assert.equal(r.body.data.order.id,orderId);}assert.equal(await PaymentOrder.countDocuments({student:users.student.id,course:course._id}),1);assert.equal(creates.size,1);
-      failCreate=true;assert.equal((await create("second")).status,502);failCreate=false;const r=await create("second");assert.equal(r.status,201);assert.equal(await PaymentOrder.countDocuments({student:users.second.id}),1);
+      failCreate=true;const diagnosticLines=[],previousLogger=console.error;
+      try {
+        console.error=(line)=>diagnosticLines.push(line);
+        const failed=await create("second");assert.equal(failed.status,502);assert.doesNotMatch(JSON.stringify(failed.body),/fixture-private|req_fixtureCreate|parameter_missing/);
+      } finally { console.error=previousLogger; }
+      assert.deepEqual(JSON.parse(diagnosticLines[0]),{event:"stripe_payment_failure",operation:"checkout_create",mode,type:"StripeInvalidRequestError",code:"parameter_missing",status:400,requestId:"req_fixtureCreate",param:"customer"});
+      failCreate=false;const r=await create("second");assert.equal(r.status,201);assert.equal(await PaymentOrder.countDocuments({student:users.second.id}),1);
       await call(`/courses/${course._id}`,users.teacher.cookie,"PATCH",{price:199.99});assert.equal((await create("student",crypto.randomUUID(),19999)).status,409);const retry=await create();assert.equal(retry.body.data.order.amountMinor,12345);await call(`/courses/${course._id}`,users.teacher.cookie,"PATCH",{price:123.45});
     });
     await t.test("real raw-body signatures reject forged/expired/modified/live/Connect events and oversized JSON",async()=>{

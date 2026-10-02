@@ -67,6 +67,12 @@ Successful full/partial provider refunds, open disputes and lost/reversed disput
 
 Checkout/provider-refresh calls are limited to 30 per student per 15 minutes in addition to the existing API limits. Checkout sessions expire after approximately 31 minutes; this timeout is separate from course-access duration. To retire an expired attempt when delivery is delayed, use **Check payment status** on its return page. Card Checkout is the implemented method; UPI and other methods are not promised. Supported methods, country/account restrictions and deployed cookie/proxy behavior require a sandbox check in the user's actual account.
 
+## Diagnosing Checkout errors
+
+Application-generated Checkout `502` responses retain the generic retry message and stable pending order. Render now logs a single JSON `stripe_payment_failure` record with operation (`checkout_create`, `order_refresh`, `webhook_reconcile`), mode, Stripe error type and validated code/status/parameter/request ID when present. Raw provider messages, stacks, headers, URLs, payment objects, customer data and credentials are excluded. Find that request ID in the account owner's Stripe Workbench to see the actual upstream error; a generic `502` alone does not establish activation, authentication, validation or network failure. API readiness validates syntax, not account eligibility.
+
+The reported `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` is a rate-limit validation log, not a Checkout failure response. Subsequent logged Checkout `502` responses after about two seconds require the provider diagnostic above. Proxy trust remains unchanged until the real trusted chain is verified; do not set `trust proxy=true` to suppress this warning. Render should use `NODE_ENV=production`, as already documented, so browser responses omit development stacks and production cookies use Secure. The user controls that private hosting setting.
+
 ## User-run hosted checks after deployment
 
 Account activation, supported live methods, deployed cookies/proxy behavior and webhook delivery are not verified by local tests. The user reported setting private live credentials and creating a live destination; no credential values or account settings were inspected. For user-controlled live validation, confirm the deployed commits, `STRIPE_MODE=live`, matching private credentials and HTTPS origin; the paywall must show **Live payment** and **Continue to payment**. Any actual live purchase, refund or payout is the user's action, not part of agent validation. Stripe test card numbers belong only in test mode.
