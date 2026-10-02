@@ -10,3 +10,4 @@ export const createInstructorValidator = [only("name", "email", "temporaryPasswo
 export const accessValidator = [only("status"), param("id").isMongoId(), body("status").isIn(["active", "suspended"]), validate];
 export const temporaryPasswordValidator = [only("temporaryPassword"), param("id").isMongoId(), passwordRule("temporaryPassword", 12), validate];
 export const transferValidator = [only("instructorId"), param("id").isMongoId(), body("instructorId").isMongoId(), validate];
+export const deleteCourseValidator = [param("id").isMongoId(), validate];

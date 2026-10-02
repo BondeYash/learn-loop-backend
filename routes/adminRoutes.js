@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { protect, authorize } from "../middleware/auth.js";
-import { accessValidator, createInstructorValidator, listValidator, temporaryPasswordValidator, transferValidator } from "../validators/adminValidators.js";
-import { createInstructor, listAudit, listUsers, listVideos, overview, setTemporaryPassword, setUserAccess, listAdminCourses, transferCourse } from "../controllers/adminController.js";
+import { accessValidator, createInstructorValidator, deleteCourseValidator, listValidator, temporaryPasswordValidator, transferValidator } from "../validators/adminValidators.js";
+import { createInstructor, deleteAdminCourse, listAudit, listUsers, listVideos, overview, setTemporaryPassword, setUserAccess, listAdminCourses, transferCourse } from "../controllers/adminController.js";
 const router = Router();
 router.use(protect, authorize("admin"));
 router.get("/overview", overview);
@@ -12,5 +12,6 @@ router.post("/users/:id/temporary-password", temporaryPasswordValidator, setTemp
 router.get("/videos", listValidator, listVideos);
 router.get("/courses", listValidator, listAdminCourses);
 router.patch("/courses/:id/instructor", transferValidator, transferCourse);
+router.delete("/courses/:id", deleteCourseValidator, deleteAdminCourse);
 router.get("/activity", listValidator, listAudit);
 export default router;

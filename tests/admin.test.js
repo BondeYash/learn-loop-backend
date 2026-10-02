@@ -139,6 +139,22 @@ test("admin provisioning, access and credential lifecycle (isolated MongoDB + HT
       assert.equal((await call("/admin/videos", instructorCookie)).status, 403);
       assert.equal((await call("/admin/courses", adminCookie)).body.data.total, 1);
     });
+    await t.test("only an admin can permanently delete a course and its learning records", async () => {
+      const course = await Course.findOne({ title: "Course" });
+      const route = `/admin/courses/${course._id}`;
+      assert.equal((await call(route, instructorCookie, "DELETE")).status, 403);
+      assert.equal((await call(route, studentCookie, "DELETE")).status, 403);
+      assert.equal((await call(route, adminCookie, "DELETE")).status, 200);
+      assert.equal((await call(route, adminCookie, "DELETE")).status, 404);
+      assert.equal(await Course.countDocuments({ _id: course._id }), 0);
+      assert.equal(await Module.countDocuments({ course: course._id }), 0);
+      assert.equal(await Lesson.countDocuments({ course: course._id }), 0);
+      assert.equal(await Enrollment.countDocuments({ course: course._id }), 0);
+      assert.equal(await VideoAsset.countDocuments({ course: course._id }), 0);
+      assert.equal((await call("/courses", studentCookie)).body.data.courses.length, 0);
+      assert.equal((await call(`/courses/${course._id}`, studentCookie)).status, 404);
+      assert.equal((await call("/admin/courses", adminCookie)).body.data.total, 0);
+    });
     await t.test("audit logs record privileged intent/results with no passwords or session material", async () => {
       const result = await call("/admin/activity?limit=100", adminCookie); assert.equal(result.status, 200);
       assert.ok(result.body.data.events.some((event) => event.action === "instructor.created" && event.outcome === "succeeded"));

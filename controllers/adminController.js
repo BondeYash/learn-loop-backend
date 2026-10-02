@@ -8,6 +8,7 @@ import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { publicUser } from "../services/authService.js";
+import { purgeCourse } from "../services/courseService.js";
 
 const listOptions = (req) => ({ page: Number(req.query.page) || 1, limit: Number(req.query.limit) || 25 });
 const searchExpression = (value) => new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
@@ -107,4 +108,9 @@ export const transferCourse = asyncHandler(async (req, res) => {
   if (!updated) throw new ApiError(409, "Course ownership changed. Refresh before retrying.");
   audit(res, "course.transferred", course._id);
   return success(res, "Course transferred. The previous instructor no longer has access; student assignments are preserved.", { course: updated });
+});
+export const deleteAdminCourse = asyncHandler(async (req, res) => {
+  const course = await purgeCourse(req.params.id);
+  audit(res, "course.deleted", course._id);
+  return success(res, "Course deleted. It is removed from the catalog, and its lessons, assignments, and files are no longer available.", {});
 });
