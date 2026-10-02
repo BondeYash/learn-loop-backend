@@ -12,7 +12,9 @@ Current creation: details → lessons/PDF notes → assign students. Read [priva
 
 LessonLoop is a video-learning application for instructors and assigned students. This is the independent API repository split from the original LMS-platform project.
 
-Instructors enter course details, upload precompressed MP4 lessons or PDF notes, and assign registered students by email. Sharing checks readiness and opens assigned-only access. Students see their assigned published courses, play private videos and track completion. The interface uses system typography, neutral light/dark surfaces and one blue accent.
+Instructors enter course details, upload precompressed MP4 lessons or PDF notes, and assign registered students by email. Sharing checks readiness and opens assigned-only access. Students see their assigned published courses, play private videos and track completion. The interface uses system typography, neutral light/dark surfaces and one teal accent.
+
+Owners/admins can upload or replace private course covers using the existing R2 bucket. Read [thumbnail limits, permissions and rollout](docs/course-thumbnails.md).
 
 ## Stack
 
@@ -36,7 +38,7 @@ Startup checks MongoDB and R2, and creates the General category if missing. `/ap
 
 1. Register as a student, or sign in with an instructor account created by an administrator. First-time instructors must change their temporary password.
 2. Enter course details. The updated frontend creates a default Lessons module; extra modules are optional.
-3. Select a precompressed H.264/AAC MP4, up to 2 GiB and four hours. Convert WebM/MOV externally first. Wait for **Ready to play** and preview it.
+3. Select a precompressed H.264/AAC MP4, up to 2 GiB and four hours. Convert WebM/MOV/MKV externally first and preview with sound. Wait for **Ready to play** and preview it.
 4. Add optional PDF notes. In **Assign students**, choose registered addresses; assignment opens access after readiness checks, without a separate publication step.
 5. Assigned students sign in, open the course, play/seek lessons and mark completion. Completion reflects the current curriculum when lessons change.
 

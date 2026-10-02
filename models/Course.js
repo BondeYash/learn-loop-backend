@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import slugify from "slugify";
 
-const thumbnailSchema = new mongoose.Schema({ url: { type: String, default: "" }, publicId: { type: String, default: "" } }, { _id: false });
+const thumbnailSchema = new mongoose.Schema({ url: { type: String, default: "" }, publicId: { type: String, default: "" }, objectKey: { type: String, select: false }, storageBucket: { type: String, select: false }, size: { type: Number, select: false }, width: Number, height: Number }, { _id: false });
 const courseSchema = new mongoose.Schema({
   title: { type: String, required: [true, "Course title is required"], trim: true, maxlength: 160 },
   slug: { type: String, unique: true, index: true },

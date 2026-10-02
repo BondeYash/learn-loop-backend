@@ -1,4 +1,3 @@
-import cloudinary from "../config/cloudinary.js";
 import ApiError from "../utils/ApiError.js";
 import Category from "../models/Category.js";
 import Course from "../models/Course.js";
@@ -14,10 +13,6 @@ export const requireCourseOwner = async (courseId, user, { allowArchived = false
 };
 export const ensureCategory = async (categoryId) => {
   if (!(await Category.exists({ _id: categoryId }))) throw new ApiError(400, "Selected category does not exist");
-};
-export const uploadCourseThumbnail = (buffer) => {
-  if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) throw new ApiError(503, "Image uploads are not configured");
-  return new Promise((resolve, reject) => cloudinary.uploader.upload_stream({ folder: "lms/course-thumbnails", resource_type: "image" }, (error, result) => error ? reject(error) : resolve({ url: result.secure_url, publicId: result.public_id })).end(buffer));
 };
 export const courseCurriculum = async (courseId) => {
   const modules = await Module.find({ course: courseId }).sort("order").lean();

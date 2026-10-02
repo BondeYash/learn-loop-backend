@@ -9,7 +9,7 @@ import { requireCourseAccess } from "../services/courseAccess.js";
 import Module from "../models/Module.js";
 import Lesson from "../models/Lesson.js";
 import { ensureCourseReady } from "../services/courseReadiness.js";
-import { archiveCourse, restoreCourse, courseCurriculum, ensureCategory, requireCourseOwner, uploadCourseThumbnail } from "../services/courseService.js";
+import { archiveCourse, restoreCourse, courseCurriculum, ensureCategory, requireCourseOwner } from "../services/courseService.js";
 
 const allowedFields = ["title", "description", "category", "price", "level", "language", "requirements", "learningOutcomes"];
 const pickCourseFields = (body) => Object.fromEntries(allowedFields.filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
@@ -83,7 +83,6 @@ export const setPublished = asyncHandler(async (req, res) => {
   if (!updated) throw new ApiError(409, "Course access changed. Refresh before publishing.");
   return new ApiResponse(res, 200, updated.isPublished ? "Course published" : "Course unpublished", { course: updated });
 });
-export const uploadThumbnail = asyncHandler(async (req, res) => { if (!req.file) throw new ApiError(400, "A thumbnail image is required"); const course = await requireCourseOwner(req.params.id, req.user); course.thumbnail = await uploadCourseThumbnail(req.file.buffer); await course.save(); return new ApiResponse(res, 200, "Thumbnail uploaded", { course }); });
 export const addModule = asyncHandler(async (req, res) => { const course = await requireCourseOwner(req.params.id, req.user); const last = await Module.findOne({ course: course._id }).sort("-order"); const count = last ? last.order + 1 : 0; const module = await Module.create({ course: course._id, title: req.body.title, order: req.body.order ?? count }); return new ApiResponse(res, 201, "Module added", { module }); });
 export const updateModule = asyncHandler(async (req, res) => { const module = await Module.findById(req.params.moduleId); if (!module || module.course.toString() !== req.params.id) throw new ApiError(404, "Module not found"); await requireCourseOwner(req.params.id, req.user); if (req.body.title !== undefined) module.title = req.body.title; if (req.body.order !== undefined) module.order = req.body.order; await module.save(); return new ApiResponse(res, 200, "Module updated", { module }); });
 export const deleteModule = asyncHandler(async (req, res) => { const module = await Module.findById(req.params.moduleId); if (!module || module.course.toString() !== req.params.id) throw new ApiError(404, "Module not found"); await requireCourseOwner(req.params.id, req.user); const lessons = await Lesson.find({ module: module._id }).select("_id"); await VideoAsset.updateMany({ lesson: { $in: lessons.map((l) => l._id) } }, { status: "cancelled" }); await Lesson.deleteMany({ module: module._id }); await module.deleteOne(); return new ApiResponse(res, 200, "Module and its lessons deleted", {}); });
