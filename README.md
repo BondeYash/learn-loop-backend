@@ -8,13 +8,15 @@ The first admin is created only through the protected interactive `npm run boots
 
 Frontend: [BondeYash/learn-loop-frontend](https://github.com/BondeYash/learn-loop-frontend).
 
+Current creation: details → lessons/PDF notes → assign students. Read [private PDF behavior and rollout](docs/course-notes.md) and the [2026-10-02 security/readiness review](docs/security-review-2026-10-02.md).
+
 LessonLoop is a video-learning application for instructors and assigned students. This is the independent API repository split from the original LMS-platform project.
 
-Instructors create courses, modules and lessons, upload precompressed MP4 videos, publish, and assign registered students by email. Students see their assigned published courses, play private videos and track completion. The interface uses system typography, neutral light/dark surfaces and one blue accent.
+Instructors enter course details, upload precompressed MP4 lessons or PDF notes, and assign registered students by email. Sharing checks readiness and opens assigned-only access. Students see their assigned published courses, play private videos and track completion. The interface uses system typography, neutral light/dark surfaces and one blue accent.
 
 ## Stack
 
-React 18, Vite 7, React Router 7, Redux Toolkit, Axios and Tailwind CSS; Node.js 22.12+, Express and MongoDB/Mongoose. Private Cloudflare R2 stores videos. New uploads and playback transfer directly between the browser and R2. The API handles accounts, course metadata, assignments and short-lived storage links. New uploads need neither FFmpeg nor local staging disk.
+React 18, Vite 7, React Router 7, Redux Toolkit, Axios and Tailwind CSS; Node.js 22.12+, Express and MongoDB/Mongoose. Private Cloudflare R2 stores videos and PDF notes. Video uploads/playback transfer directly between browser and R2; bounded PDF uploads pass through the API. The API handles accounts, course metadata, assignments and short-lived storage links. New uploads need neither FFmpeg nor local staging disk.
 
 ## Local setup
 
@@ -33,9 +35,9 @@ Startup checks MongoDB and R2, and creates the General category if missing. `/ap
 ## Course flow
 
 1. Register as a student, or sign in with an instructor account created by an administrator. First-time instructors must change their temporary password.
-2. Create a course draft, add a module and a video lesson.
+2. Enter course details. The updated frontend creates a default Lessons module; extra modules are optional.
 3. Select a precompressed H.264/AAC MP4, up to 2 GiB and four hours. Convert WebM/MOV externally first. Wait for **Ready to play** and preview it.
-4. Publish when all video lessons are ready. Assign registered student email addresses in **Assigned students**.
+4. Add optional PDF notes. In **Assign students**, choose registered addresses; assignment opens access after readiness checks, without a separate publication step.
 5. Assigned students sign in, open the course, play/seek lessons and mark completion. Completion reflects the current curriculum when lessons change.
 
 ## Direct uploads
@@ -66,6 +68,6 @@ Existing ready R2 video records and keys remain usable by the signed player. The
 
 In this repository: `npm test`, `npm audit`. The complete suite requires a disposable local MongoDB on port 27018 and FFmpeg/FFprobe for legacy regression tests. It creates a random `lms_test_*` database and temporary files, then removes only those fixtures. It does not load `.env` or use Atlas/R2 credentials. `node --test tests/direct.test.js` checks only the new flow, using real local MongoDB/HTTP with mocked object storage, without FFmpeg. `TEST_MONGO_PORT` overrides the local test port.
 
-The automated suite has 40 passing tests, including admin provisioning, credential/session invalidation, ownership transfer, course CRUD, archive/restore preservation and publication races. The new storage tests distinguish SDK mocks from the real MongoDB/HTTP flow. Existing R2 samples remain playable. With the local CORS rule applied, a real instructor browser uploaded a retained 1,314,164-byte synthetic MP4 directly to R2; completion verified it, conditionally copied it and removed the incoming object without local staging. The course was published/assigned and its student player completed playback, sought, restored completion after reload and renewed its signed URL. Local CORS preflights pass for the two exact origins and deny an unlisted origin. No production/load test or every-device guarantee is claimed. See [deployment guidance](docs/deployment.md) for the same-origin Cloudflare/Render setup. Public frontend/API deployment health has been checked; no hosted authenticated end-to-end or concurrent-viewer load test is claimed. Captions, adaptive bitrate, quizzes, payments and certificates remain outside scope.
+The automated suite has 48 passing tests, including private PDFs and readiness-aware sharing, including admin provisioning, credential/session invalidation, ownership transfer, course CRUD, archive/restore preservation and publication races. The new storage tests distinguish SDK mocks from the real MongoDB/HTTP flow. Existing R2 samples remain playable. With the local CORS rule applied, a real instructor browser uploaded a retained 1,314,164-byte synthetic MP4 directly to R2; completion verified it, conditionally copied it and removed the incoming object without local staging. The course was published/assigned and its student player completed playback, sought, restored completion after reload and renewed its signed URL. Local CORS preflights pass for the two exact origins and deny an unlisted origin. No production/load test or every-device guarantee is claimed. See [deployment guidance](docs/deployment.md) for the same-origin Cloudflare/Render setup. Public frontend/API deployment health has been checked; no hosted authenticated end-to-end or concurrent-viewer load test is claimed. Captions, adaptive bitrate, quizzes, payments and certificates remain outside scope.
 
 Live evidence and limits: [local verification record](docs/verification.md).

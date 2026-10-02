@@ -6,12 +6,14 @@ import connectDB from "./config/db.js";
 import { checkObjectStore } from "./services/videoObjectStore.js";
 import mongoose from "mongoose";
 import Category from "./models/Category.js";
+import CourseNote from "./models/CourseNote.js";
 
 const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
   await connectDB();
   await checkObjectStore();
+  await CourseNote.init();
   await Category.updateOne({ slug: "general" }, { $setOnInsert: { name: "General", slug: "general" } }, { upsert: true });
   let stopWorker = () => {};
   if (process.env.ENABLE_LEGACY_VIDEO_WORKER === "true") {

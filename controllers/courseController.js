@@ -8,6 +8,7 @@ import VideoAsset from "../models/VideoAsset.js";
 import { requireCourseAccess } from "../services/courseAccess.js";
 import Module from "../models/Module.js";
 import Lesson from "../models/Lesson.js";
+import { ensureCourseReady } from "../services/courseReadiness.js";
 import { archiveCourse, restoreCourse, courseCurriculum, ensureCategory, requireCourseOwner, uploadCourseThumbnail } from "../services/courseService.js";
 
 const allowedFields = ["title", "description", "category", "price", "level", "language", "requirements", "learningOutcomes"];
@@ -29,7 +30,9 @@ export const getCourse = asyncHandler(async (req, res) => {
   const course = await Course.findOne({ $or: identifiers }).populate("instructor", "name avatar bio").populate("category", "name slug");
   if (!course) throw new ApiError(404, "Course not found");
   await requireCourseAccess(course._id, req.user);
-  return new ApiResponse(res, 200, "Course retrieved", { course, modules: await courseCurriculum(course._id) });
+  const modules = await courseCurriculum(course._id);
+  if (req.user.role === "student") for (const module of modules) module.lessons = module.lessons.filter((lesson) => lesson.contentType === "text" || lesson.video?.status === "ready");
+  return new ApiResponse(res, 200, "Course retrieved", { course, modules });
 });
 export const myCourses = asyncHandler(async (req, res) => {
   const filter = { ...(req.user.role === "admin" ? {} : { instructor: req.user._id }), archivedAt: req.query.archived === "true" ? { $ne: null } : null };
@@ -48,7 +51,8 @@ export const getMyCourse = asyncHandler(async (req, res) => {
 export const createCourse = asyncHandler(async (req, res) => {
   await ensureCategory(req.body.category);
   const course = await Course.create({ ...pickCourseFields(req.body), instructor: req.user._id });
-  return new ApiResponse(res, 201, "Course created as a draft", { course });
+  if (req.body.setupLessons === true) await Module.create({ course: course._id, title: "Lessons", order: 0 });
+  return new ApiResponse(res, 201, "Course created. Add content, then assign it to students.", { course });
 });
 export const updateCourse = asyncHandler(async (req, res) => {
   const course = await requireCourseOwner(req.params.id, req.user);
@@ -72,8 +76,7 @@ export const restoreArchivedCourse = asyncHandler(async (req, res) => {
 export const setPublished = asyncHandler(async (req, res) => {
   const course = await requireCourseOwner(req.params.id, req.user);
   if (req.body.published) {
-    const lessons = await Lesson.find({ course: course._id }).populate("video", "status");
-    if (!lessons.length || lessons.some((lesson) => lesson.contentType === "video" && lesson.video?.status !== "ready")) throw new ApiError(409, "Add lessons and wait until every video is ready before publishing");
+    await ensureCourseReady(course._id);
   }
   // A publish racing with archive must never reopen access.
   const updated = await Course.findOneAndUpdate({ _id: course._id, archivedAt: null, instructor: course.instructor }, { $set: { isPublished: req.body.published }, ...(req.body.published ? { $set: { isPublished: true, publishedAt: new Date() } } : { $unset: { publishedAt: 1 } }) }, { new: true });

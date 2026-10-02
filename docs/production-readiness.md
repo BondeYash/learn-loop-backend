@@ -2,6 +2,8 @@
 
 Audit scope: MongoDB Atlas + Render API + Cloudflare frontend/Worker + private R2. Initial assumption is 100 enrolled students, not a proven 100 simultaneous streams. The current admin/course release closes public instructor signup, supplies protected provisioning, temporary-password enforcement, account suspension, oversight/auditing and recoverable whole-course deletion. It preserves existing accounts for review.
 
+Updated 2026-10-02: readiness-aware assignment, private course PDF notes, student video deterrents/watermark and accessible skeletons are implemented. See the [current source-grounded security review](security-review-2026-10-02.md) for confirmed gaps, inferred risks, unknown settings, mitigations, acceptance tests and a phased plan. It supersedes earlier implementation/evidence counts below. No unrelated hardening was implemented.
+
 Implemented foundations: opaque hashed cookie sessions, server-side ownership and published/assigned-course checks, short-lived R2 tickets, immutable final video keys, origin checks, upload completion validation and player renewal. Public health checks succeeded on 2026-10-01. Automated/local browser checks are not hosted end-to-end or load certification.
 
 Effort ranges below are planning estimates for one experienced engineer, excluding provider approvals and waiting for DNS. Dependencies and acceptance criteria determine completion, not elapsed time.

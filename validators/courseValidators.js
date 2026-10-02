@@ -13,7 +13,7 @@ const courseFields = [
   body("learningOutcomes").optional().isArray(), body("learningOutcomes.*").optional().trim().isLength({ max: 300 }),
 ];
 const lessonFields = [body("title").trim().notEmpty().withMessage("Lesson title is required").isLength({ max: 160 }), body("contentType").optional().isIn(["video", "pdf", "text"]), body("contentUrl").optional().trim().isURL().withMessage("Content URL must be valid"), body("content").optional().trim().isLength({ max: 50000 }), body("duration").optional().isFloat({ min: 0 }).toFloat(), body("order").optional().isInt({ min: 0 }).toInt(), body("isPreview").optional().isBoolean().toBoolean()];
-export const createCourseValidator = [...courseFields, validate];
+export const createCourseValidator = [...courseFields, body("setupLessons").optional().isBoolean().toBoolean(), validate];
 export const updateCourseValidator = [objectId("id"), body("title").optional().trim().notEmpty().isLength({ max: 160 }), body("description").optional().trim().notEmpty().isLength({ max: 10000 }), body("category").optional().isMongoId(), body("price").optional().isFloat({ min: 0 }).toFloat(), body("level").optional().isIn(["beginner", "intermediate", "advanced"]), body("language").optional().trim().isLength({ max: 50 }), body("requirements").optional().isArray(), body("learningOutcomes").optional().isArray(), validate];
 export const courseIdValidator = [objectId("id"), validate];
 export const publishValidator = [objectId("id"), body("published").isBoolean().withMessage("published must be true or false").toBoolean(), validate];

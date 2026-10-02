@@ -1,4 +1,6 @@
 import { param } from "express-validator";
+import { listNotes, uploadNote, noteLink, removeNote, ownNoteCourse } from "../controllers/courseNoteController.js";
+import { limitNoteUploads, parseNoteUpload } from "../middleware/noteUpload.js";
 import { restoreArchivedCourse } from "../controllers/courseController.js";
 import { validate } from "../validators/authValidators.js";
 import { listAssignments, assignStudents, revokeAssignment } from "../controllers/assignmentController.js";
@@ -21,4 +23,8 @@ router.post("/:id/modules/:moduleId/lessons", protect, authorize("instructor", "
 router.get("/:id/assignments", protect, authorize("instructor", "admin"), courseIdValidator, listAssignments);
 router.post("/:id/assignments", protect, authorize("instructor", "admin"), courseIdValidator, assignStudents);
 router.delete("/:id/assignments/:studentId", protect, authorize("instructor", "admin"), courseIdValidator, param("studentId").isMongoId(), validate, revokeAssignment);
+router.get("/:id/notes", protect, courseIdValidator, listNotes);
+router.post("/:id/notes", protect, authorize("instructor", "admin"), courseIdValidator, ownNoteCourse, limitNoteUploads, parseNoteUpload, uploadNote);
+router.get("/:id/notes/:noteId/url", protect, courseIdValidator, param("noteId").isMongoId(), validate, noteLink);
+router.delete("/:id/notes/:noteId", protect, authorize("instructor", "admin"), courseIdValidator, param("noteId").isMongoId(), validate, ownNoteCourse, removeNote);
 export default router;
