@@ -5,7 +5,7 @@ import ApiResponse from "../utils/ApiResponse.js";
 import ApiError from "../utils/ApiError.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { requireCourseOwner } from "../services/courseService.js";
-import { requireCourseAccess, managesCourse } from "../services/courseAccess.js";
+import { managesCourse } from "../services/courseAccess.js";
 import { prepareThumbnail, courseThumbnailStore } from "../services/courseThumbnailStore.js";
 
 export const ownThumbnailCourse = asyncHandler(async (req, _res, next) => { req.thumbnailCourse = await requireCourseOwner(req.params.id, req.user); next(); });
@@ -29,7 +29,12 @@ export const uploadThumbnail = asyncHandler(async (req, res) => {
 export const readThumbnail = asyncHandler(async (req, res) => {
   const course = await Course.findById(req.params.id).select("+thumbnail.objectKey +thumbnail.storageBucket +thumbnail.size");
   if (!course) throw new ApiError(404, "Course not found");
-  if (!managesCourse(course, req.user)) await requireCourseAccess(course._id, req.user);
+  // Published covers are visible to every signed-in student. Assignment and
+  // payment still gate videos, notes, and progress.
+  if (!managesCourse(course, req.user)) {
+    if (course.archivedAt) throw new ApiError(410, "This course has been archived and is unavailable.");
+    if (req.user.role !== "student" || !course.isPublished) throw new ApiError(403, "This course is not published.");
+  }
   if (!course.thumbnail?.objectKey) throw new ApiError(404, "No private thumbnail is available.");
   let stream;
   try { stream = await (req.app.locals.courseThumbnailStore || courseThumbnailStore()).read(course.thumbnail); }

@@ -77,16 +77,16 @@ test("private course thumbnail lifecycle (isolated MongoDB + HTTP, R2 mocked)", 
       const stored = await Course.findById(id).select("+thumbnail.objectKey +thumbnail.size"); assert.ok(stored.thumbnail.objectKey); assert.ok(stored.thumbnail.size > 0);
       const managed = await request(`/courses/mine/${id}`, users.owner.cookie); assert.equal(managed.body.data.course.thumbnail.url, saved); assert.equal(managed.body.data.course.thumbnail.objectKey, undefined);
     });
-    await t.test("only owner/admin or assigned students can read image; bytes and private headers survive", async () => {
+    await t.test("published covers are readable by every student; owner and admin still can; bytes and private headers survive", async () => {
       assert.equal((await request(endpoint)).status, 401);
       for (const role of ["student", "stranger", "other"]) assert.equal((await request(endpoint, users[role].cookie)).status, 403);
       await Course.updateOne({ _id: id }, { isPublished: true });
       await Enrollment.create({ course: id, student: users.student.id, assignedBy: users.owner.id });
-      for (const role of ["owner", "admin", "student"]) {
+      for (const role of ["owner", "admin", "student", "stranger"]) {
         const read = await request(endpoint, users[role].cookie, "GET", undefined, true);
         assert.equal(read.status, 200); assert.equal(read.headers.get("content-type"), "image/webp"); assert.equal(read.headers.get("cache-control"), "private, no-store"); assert.equal((await sharp(read.body).metadata()).format, "webp");
       }
-      assert.equal((await request(endpoint, users.stranger.cookie)).status, 403);
+      assert.equal((await request(endpoint, users.other.cookie)).status, 403);
       assert.equal((await request("/enrollments/me", users.student.cookie)).body.data.enrollments[0].course.thumbnail.url, saved);
     });
     await t.test("replacement persists, old objects retained and storage failure preserves current image", async () => {
@@ -99,8 +99,8 @@ test("private course thumbnail lifecycle (isolated MongoDB + HTTP, R2 mocked)", 
       await mongoose.disconnect(); await mongoose.connect(`mongodb://127.0.0.1:${process.env.TEST_MONGO_PORT || 27018}/${database}`);
       assert.equal((await Course.findById(id)).thumbnail.url, saved);
     });
-    await t.test("archive, assignment revocation and concurrent transfer cannot reopen image access", async () => {
-      await Enrollment.deleteMany({ course: id }); assert.equal((await request(endpoint, users.student.cookie)).status, 403);
+    await t.test("archive and concurrent transfer cannot reopen image access; unassigned students still see a published cover", async () => {
+      await Enrollment.deleteMany({ course: id }); assert.equal((await request(endpoint, users.student.cookie, "GET", undefined, true)).status, 200);
       await Course.updateOne({ _id: id }, { archivedAt: new Date(), isPublished: false });
       assert.equal((await upload(id, users.owner.cookie)).status, 410); assert.equal((await request(endpoint, users.student.cookie)).status, 410);
       assert.equal((await request(endpoint, users.owner.cookie, "GET", undefined, true)).status, 200); assert.equal(objects.size, 2);
