@@ -5,15 +5,15 @@ import Lesson from "../models/Lesson.js";
 import Enrollment from "../models/Enrollment.js";
 import Progress from "../models/Progress.js";
 import { currentProgress, withCurrentCompletion } from "../services/currentProgress.js";
-import { requireCourseAccess } from "../services/courseAccess.js";
+import { hasCourseEnrollment, requireCourseAccess } from "../services/courseAccess.js";
 import { withCoursePayments } from "../services/coursePayments.js";
 export const myEnrollments = asyncHandler(async (req, res) => {
-  const enrollments = await Enrollment.find({ student: req.user._id, assignedBy: { $exists: true } }).populate({ path: "course", match: { isPublished: true, archivedAt: null }, populate: [{ path: "instructor", select: "name" }, { path: "category", select: "name" }] });
-  const visible = enrollments.filter((item) => item.course).map((item) => item.toObject());
+  const enrollments = await Enrollment.find({ student: req.user._id }).populate({ path: "course", match: { isPublished: true, archivedAt: null }, populate: [{ path: "instructor", select: "name" }, { path: "category", select: "name" }] });
+  const visible = enrollments.filter((item) => item.course && hasCourseEnrollment(item.course, item)).map((item) => item.toObject());
   const courses = new Map((await withCoursePayments(visible.map((item) => item.course), req.user._id)).map((course) => [String(course._id), course]));
   for (const item of visible) item.course = courses.get(String(item.course._id));
   const progress = await currentProgress(visible);
-  return new ApiResponse(res, 200, "Assigned courses retrieved", { enrollments: visible.map((item) => withCurrentCompletion(item, progress.get(`${item.student}:${item.course._id}`))) });
+  return new ApiResponse(res, 200, "Enrolled courses retrieved", { enrollments: visible.map((item) => withCurrentCompletion(item, progress.get(`${item.student}:${item.course._id}`))) });
 });
 export const completeLesson = asyncHandler(async (req, res) => {
   const lesson = await Lesson.findById(req.params.id).populate("video", "status");
@@ -25,7 +25,7 @@ export const completeLesson = asyncHandler(async (req, res) => {
   const existing = await Lesson.countDocuments({ course: lesson.course, _id: { $in: progress.completedLessons } });
   progress.percentage = total ? Math.min(100, Math.round(existing / total * 100)) : 0;
   await progress.save();
-  await Enrollment.updateOne({ student: req.user._id, course: lesson.course, assignedBy: { $exists: true } }, progress.percentage === 100 ? { status: "completed", completedAt: new Date() } : { $set: { status: "active" }, $unset: { completedAt: 1 } });
+  await Enrollment.updateOne({ student: req.user._id, course: lesson.course }, progress.percentage === 100 ? { status: "completed", completedAt: new Date() } : { $set: { status: "active" }, $unset: { completedAt: 1 } });
   return new ApiResponse(res, 200, "Lesson marked complete", { progress });
 });
 export const courseProgress = asyncHandler(async (req, res) => {

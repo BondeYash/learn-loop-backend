@@ -1,7 +1,6 @@
 import { currentProgress, withCurrentCompletion } from "../services/currentProgress.js";
 import User from "../models/User.js";
 import Enrollment from "../models/Enrollment.js";
-import Progress from "../models/Progress.js";
 import Course from "../models/Course.js";
 import { ensureCourseReady } from "../services/courseReadiness.js";
 import { requireCourseOwner } from "../services/courseService.js";
@@ -32,7 +31,6 @@ export const assignStudents = asyncHandler(async (req, res) => {
 });
 export const revokeAssignment = asyncHandler(async (req, res) => {
   await requireCourseOwner(req.params.id, req.user);
-  await Enrollment.deleteOne({ course: req.params.id, student: req.params.studentId });
-  await Progress.deleteOne({ course: req.params.id, student: req.params.studentId });
-  return new ApiResponse(res, 200, "Course access removed", {});
+  await Enrollment.updateOne({ course: req.params.id, student: req.params.studentId }, { $unset: { assignedBy: "" } });
+  return new ApiResponse(res, 200, "Instructor assignment removed. Learning progress and public enrollments are retained.", {});
 });

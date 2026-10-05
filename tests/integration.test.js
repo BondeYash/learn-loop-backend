@@ -97,7 +97,8 @@ test("Real MongoDB + HTTP + FFmpeg integration", { timeout: 120_000 }, async (t)
     await t.test("course ownership, assigned-only content, and no self-enrollment bypass", async () => {
       assert.equal((await call(`/courses/${courseId}`, { cookie: student.cookie })).status, 403);
       assert.equal((await call(`/courses/${courseId}`, { cookie: otherTeacher.cookie })).status, 403);
-      assert.equal((await call(`/courses/${courseId}/enroll`, { method: "POST", cookie: student.cookie })).status, 404);
+      assert.equal((await call(`/courses/${courseId}/enroll`, { method: "POST", cookie: student.cookie })).status, 400, "Enrollment requires a validated price quote");
+      assert.equal((await call(`/courses/${courseId}/enroll`, { method: "POST", cookie: student.cookie, body: { quotedAmountMinor: 0 } })).status, 404, "A valid request cannot self-enroll in a private course");
       assert.equal((await call(`/courses/${courseId}/assignments`, { method: "POST", cookie: otherTeacher.cookie, body: { emails: [student.user.email] } })).status, 403);
       assert.equal((await call(`/courses/${courseId}/assignments`, { method: "POST", cookie: teacher.cookie, body: { emails: [student.user.email, "missing@example.test"] } })).status, 400);
       assert.equal(await Enrollment.countDocuments(), 0);

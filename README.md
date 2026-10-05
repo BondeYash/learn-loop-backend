@@ -1,6 +1,6 @@
 # LessonLoop backend
 
-LessonLoop supports government-exam learning with a deliberately public course catalog and selected samples alongside protected learning content. Existing courses stay private by default. Read [public discovery, privacy controls and rollout](docs/public-discovery.md) for Stage 1 behavior; self-service public enrollment follows separately.
+LessonLoop supports government-exam learning with a deliberately public course catalog and selected samples alongside protected learning content. Existing courses stay private by default. Read [public discovery, privacy controls and rollout](docs/public-discovery.md) for discovery behavior and [public enrollment](docs/public-enrollment.md) for self-service access.
 
 ## Admin and course management release
 
@@ -58,9 +58,9 @@ Successful confirmation attempts to delete only its temporary `incoming/` object
 
 ## Private playback and sessions
 
-`GET /api/lessons/:lessonId/playback` checks the live session, ownership or assignment, publication and readiness, then issues a signed R2 GET URL. The default lifetime is five minutes, configurable from 60 seconds to 15 minutes. The native player uses R2 byte ranges for seeking, renews before expiry and restores the playback position. Renewal failure shows a retryable error. The course screen also refreshes access approximately every 15 seconds.
+`GET /api/lessons/:lessonId/playback` checks the live session, ownership or eligible enrollment, publication and readiness, then issues a signed R2 GET URL. The default lifetime is five minutes, configurable from 60 seconds to 15 minutes. The native player uses R2 byte ranges for seeking, renews before expiry and restores the playback position. Renewal failure shows a retryable error. The course screen also refreshes access approximately every 15 seconds.
 
-Revoking assignment, unpublishing or logging out blocks new playback tickets. An already issued URL is a bearer credential usable until expiry, and downloaded/buffered bytes cannot be revoked. Do not log/share signed URLs. This is private access control, not DRM. URLs are held in component memory, not browser storage.
+Removing the required enrollment/assignment, unpublishing or logging out blocks new playback tickets. An already issued URL is a bearer credential usable until expiry, and downloaded/buffered bytes cannot be revoked. Do not log/share signed URLs. This is private access control, not DRM. URLs are held in component memory, not browser storage.
 
 Opaque seven-day sessions use HttpOnly, SameSite=Lax cookies scoped to `/api`, with Secure enabled in production. MongoDB stores only token hashes. Logout revokes the current session; password reset revokes all account sessions. The client handles restoration, expiry, cross-tab account changes and stale responses. SMTP is required for password-reset delivery. Admin-controlled instructor provisioning is implemented; email verification, email invitations and MFA remain follow-up work.
 
@@ -75,3 +75,5 @@ In this repository: `npm test`, `npm audit`. The complete suite requires a dispo
 The automated suite has 48 passing tests, including private PDFs and readiness-aware sharing, including admin provisioning, credential/session invalidation, ownership transfer, course CRUD, archive/restore preservation and publication races. The new storage tests distinguish SDK mocks from the real MongoDB/HTTP flow. Existing R2 samples remain playable. With the local CORS rule applied, a real instructor browser uploaded a retained 1,314,164-byte synthetic MP4 directly to R2; completion verified it, conditionally copied it and removed the incoming object without local staging. The course was published/assigned and its student player completed playback, sought, restored completion after reload and renewed its signed URL. Local CORS preflights pass for the two exact origins and deny an unlisted origin. No production/load test or every-device guarantee is claimed. See [deployment guidance](docs/deployment.md) for the same-origin Cloudflare/Render setup. Public frontend/API deployment health has been checked; no hosted authenticated end-to-end or concurrent-viewer load test is claimed. Captions, adaptive bitrate, quizzes, payments and certificates remain outside scope.
 
 Live evidence and limits: [local verification record](docs/verification.md).
+
+Current public enrollment and payment-record behavior: [Stage 2 documentation](docs/public-enrollment.md).

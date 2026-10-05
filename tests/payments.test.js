@@ -97,7 +97,7 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
     }
   };
   try{
-    for(const [name,role] of [["teacher","instructor"],["other","instructor"],["admin","admin"],["student","student"],["stranger","student"],["second","student"],["race","student"],["early","student"],["delayed","student"],["delayedfail","student"],["migrate","student"],["reuse","student"],["uncertain","student"],["legacy_paid","student"],["legacy_invalid","student"],["old_uncertain","student"],["old_reuse","student"]]){
+    for(const [name,role] of [["teacher","instructor"],["other","instructor"],["admin","admin"],["student","student"],["stranger","student"],["second","student"],["race","student"],["early","student"],["delayed","student"],["delayedfail","student"],["migrate","student"],["reuse","student"],["uncertain","student"],["legacy_paid","student"],["legacy_invalid","student"],["old_uncertain","student"],["old_reuse","student"],["publicfree","student"],["publicretry","student"]]){
       const password=crypto.randomBytes(24).toString("hex"),user=await User.create({name,role,email:`${name}@fixture.invalid`,password});users[name]={id:user._id,role,cookie:(await call("/auth/login",null,"POST",{email:user.email,password})).cookie};
     }
     const category=await Category.create({name:"General"});course=await Course.create({title:"Paid assigned course",description:"Fixture",instructor:users.teacher.id,category:category._id,price:123.45,isPublished:true});
@@ -307,6 +307,89 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
       await access(200);await access(402,"migrate");await access(403,"stranger");
       assert.deepEqual(await PaymentOrder.find({course:course._id}).sort("_id").lean(),history);
       const made=await call("/courses",users.teacher.cookie,"POST",{title:"Explicitly free course",description:"Fixture",category:String(category._id),price:0});assert.equal(made.status,201);assert.equal(made.body.data.course.price,0);
+    });
+    await t.test("public paid checkout requires canonical settlement and automatically enrolls once; history is private and mode-scoped",async()=>{
+      await Course.updateOne({_id:course._id},{visibility:"public",price:123.45,isPublished:true});
+      const quote=(await call(`/payments/courses/${course._id}/quote`,users.stranger.cookie)).body.data.quote;
+      assert.equal(quote.enrollmentRequired,true);assert.equal(quote.requiresPayment,true);await access(403,"stranger");
+      assert.equal((await call(`/courses/${course._id}/enroll`,users.stranger.cookie,"POST",{quotedAmountMinor:12345,paid:true,assignedBy:String(users.teacher.id)})).status,402);
+      const key=crypto.randomUUID(),created=await create("stranger",key);assert.equal(created.status,201,JSON.stringify(created.body));
+      const duplicate=await create("stranger",key);assert.equal(duplicate.body.data.order.id,created.body.data.order.id);
+      const row=await PaymentOrder.findById(created.body.data.order.id);assert.equal(row.enrollmentType,"public");
+      assert.equal(await Enrollment.countDocuments({student:users.stranger.id,course:course._id}),0);
+      const open=[...sessions.values()].find(s=>s.metadata.orderId===String(row._id));
+      assert.equal((await webhook(event("checkout.session.completed",open))).status,200);await access(403,"stranger");
+      const session=pay(row),intent=intents.get(session.payment_intent);intent.metadata={...intent.metadata,studentId:String(users.second.id)};
+      assert.equal((await webhook(event("checkout.session.completed",session))).status,409);await access(403,"stranger");intent.metadata=session.metadata;
+      const settled=event("checkout.session.completed",session);assert.equal((await webhook(settled)).status,200);assert.equal((await webhook(settled)).body.duplicate,true);await access(200,"stranger");
+      const enrollment=await Enrollment.findOne({student:users.stranger.id,course:course._id});assert.equal(enrollment.assignedBy,undefined);assert.deepEqual([...enrollment.publicPurchaseModes],[mode]);
+      assert.equal(await Enrollment.countDocuments({student:users.stranger.id,course:course._id}),1);
+      const record=await call(`/payments/orders/${row._id}`,users.stranger.cookie);assert.equal(record.body.data.order.canAccess,true);
+      assert.equal((await call(`/payments/orders/${row._id}`,users.second.cookie)).status,404);
+      assert.equal((await call(`/payments/orders/${row._id}/refresh`,users.second.cookie,"POST",{})).status,404);
+      const history=(await call("/payments/orders?limit=1&page=1",users.stranger.cookie)).body.data;
+      assert.equal(history.total,1);assert.equal(history.orders[0].id,String(row._id));assert.equal(history.testMode,testMode);
+      for(const field of ["student","instructor","stripeSessionId","stripePaymentIntentId","checkoutUrl","requestKey","checkoutContract"])assert.equal(history.orders[0][field],undefined);
+      for(const path of ["/payments/orders?limit=51","/payments/orders?page=0","/payments/orders?page=NaN"])assert.equal((await call(path,users.stranger.cookie)).status,400);
+      const otherMode=testMode?"live":"test",OtherOrder=paymentOrderModel(otherMode);await OtherOrder.init();
+      const foreign=await OtherOrder.create({student:users.stranger.id,course:course._id,instructor:users.teacher.id,title:"Other mode",amountMinor:12345,requestKey:crypto.randomUUID(),status:"paid",active:false,checkoutExpiresAt:new Date(Date.now()+3600000)});
+      assert.equal((await call(`/payments/orders/${foreign._id}`,users.stranger.cookie)).status,404);
+      assert.equal((await call("/payments/orders",users.stranger.cookie)).body.data.total,1);
+      const progress=await Progress.findOne({student:users.stranger.id,course:course._id});assert.ok(progress);
+      intent.latest_charge.amount_refunded=100;assert.equal((await webhook(event("charge.refunded",intent.latest_charge))).status,200);await access(402,"stranger");
+      assert.equal((await call(`/payments/orders/${row._id}`,users.stranger.cookie)).body.data.order.canAccess,false);
+      assert.ok(await Progress.exists({_id:progress._id}));assert.equal(await Enrollment.countDocuments({_id:enrollment._id}),1);
+      intent.latest_charge.amount_refunded=0;assert.equal((await webhook(event("checkout.session.completed",session))).status,200);await access(200,"stranger");
+    });
+    await t.test("free public enrollment is explicit, idempotent, needs no Stripe configuration and preserves progress",async()=>{
+      await Course.updateOne({_id:course._id},{price:0});
+      await access(403,"publicfree");
+      const secret=process.env.STRIPE_SECRET_KEY,signing=process.env.STRIPE_WEBHOOK_SECRET,calls=createCalls;delete process.env.STRIPE_SECRET_KEY;delete process.env.STRIPE_WEBHOOK_SECRET;
+      try {
+        const quote=(await call(`/payments/courses/${course._id}/quote`,users.publicfree.cookie)).body.data;assert.equal(quote.readiness.configured,false);assert.equal(quote.quote.enrollmentRequired,true);assert.equal(quote.quote.requiresPayment,false);
+        const enroll=()=>call(`/courses/${course._id}/enroll`,users.publicfree.cookie,"POST",{quotedAmountMinor:0});
+        const results=await Promise.all([enroll(),enroll(),enroll()]);for(const result of results)assert.equal(result.status,200,JSON.stringify(result.body));
+        assert.equal(await Enrollment.countDocuments({student:users.publicfree.id,course:course._id}),1);assert.equal(createCalls,calls);await access(200,"publicfree");
+        const enrollment=await Enrollment.findOne({student:users.publicfree.id,course:course._id});assert.equal(enrollment.publicFreeEnrollment,true);assert.equal(enrollment.assignedBy,undefined);
+        await Enrollment.updateOne({_id:enrollment._id},{status:"completed",completedAt:new Date()});
+        assert.equal((await enroll()).status,200);assert.equal((await Enrollment.findById(enrollment._id)).status,"completed");
+        assert.equal((await call(`/courses/${course._id}/enroll`,users.publicretry.cookie,"POST",{quotedAmountMinor:12345})).status,409);await access(403,"publicretry");
+      } finally {process.env.STRIPE_SECRET_KEY=secret;process.env.STRIPE_WEBHOOK_SECRET=signing;}
+      await Course.updateOne({_id:course._id},{price:123.45});await access(402,"publicfree");await access(200,"stranger");
+    });
+    await t.test("public enrollment respects current availability, private assignment, mode changes and revoked assignments",async()=>{
+      await Course.updateOne({_id:course._id},{price:0});
+      process.env.STRIPE_MODE=testMode?"live":"test";
+      try {await access(403,"stranger");await access(200,"publicfree");}finally{process.env.STRIPE_MODE=mode;}
+      await Course.updateOne({_id:course._id},{visibility:"private"});await access(403,"stranger");await access(403,"publicfree");await access(200,"student");
+      assert.equal((await call(`/courses/${course._id}/enroll`,users.publicretry.cookie,"POST",{quotedAmountMinor:0})).status,404);
+      assert.equal((await create("publicretry",crypto.randomUUID(),12345)).status,403);
+      await Course.updateOne({_id:course._id},{visibility:"public",isPublished:false});await access(403,"publicfree");assert.equal((await call(`/courses/${course._id}/enroll`,users.publicretry.cookie,"POST",{quotedAmountMinor:0})).status,404);
+      await Course.updateOne({_id:course._id},{isPublished:true,archivedAt:new Date()});await access(410,"publicfree");
+      await Course.updateOne({_id:course._id},{archivedAt:null});await access(200,"publicfree");
+      const oldProgress=await Progress.findOne({student:users.student.id,course:course._id});
+      assert.equal((await call(`/courses/${course._id}/assignments/${users.student.id}`,users.teacher.cookie,"DELETE")).status,200);
+      assert.ok(await Progress.exists({_id:oldProgress._id}));await access(403,"student");
+      await Enrollment.updateOne({student:users.publicfree.id,course:course._id},{assignedBy:users.teacher.id});
+      assert.equal((await call(`/courses/${course._id}/assignments/${users.publicfree.id}`,users.teacher.cookie,"DELETE")).status,200);await access(200,"publicfree");
+      const saved=await Enrollment.findOne({student:users.publicfree.id,course:course._id});assert.equal(saved.assignedBy,undefined);assert.equal(saved.publicFreeEnrollment,true);
+    });
+    await t.test("an older private payment stays private until an explicit public enrollment request; stale price cannot create another checkout",async()=>{
+      await Course.updateOne({_id:course._id},{price:123.45});
+      // Existing assigned purchase becomes eligible only after this student's explicit enrollment action.
+      await access(403,"student");
+      assert.equal((await call(`/courses/${course._id}/enroll`,users.student.cookie,"POST",{quotedAmountMinor:12345})).status,200);await access(200,"student");
+      await Course.updateOne({_id:course._id},{price:199.99});
+      assert.equal((await create("publicretry",crypto.randomUUID(),12345)).status,409);assert.equal(await PaymentOrder.countDocuments({student:users.publicretry.id}),0);
+      const made=await create("publicretry",crypto.randomUUID(),19999);assert.equal(made.status,201);
+      await Course.updateOne({_id:course._id},{price:299.99});
+      const quote=(await call(`/payments/courses/${course._id}/quote`,users.publicretry.cookie)).body.data.quote;assert.equal(quote.amountMinor,19999);assert.equal(quote.currentAmountMinor,29999);
+      const retried=await create("publicretry",crypto.randomUUID(),19999);assert.equal(retried.body.data.order.id,made.body.data.order.id);
+      await Course.updateOne({_id:course._id},{visibility:"private"});
+      const row=await PaymentOrder.findById(made.body.data.order.id),session=pay(row);assert.equal((await webhook(event("checkout.session.completed",session))).status,200);await access(403,"publicretry");assert.equal(await Enrollment.countDocuments({student:users.publicretry.id,course:course._id}),0);
+      await Course.updateOne({_id:course._id},{visibility:"public"});
+      assert.equal((await call(`/payments/orders/${row._id}/refresh`,users.publicretry.cookie,"POST",{})).status,200);await access(200,"publicretry");
+      await access(200,"student");
     });
   }finally{
     await new Promise(resolve=>server.close(resolve));delete app.locals.stripeClient;delete app.locals.directVideoStore;delete app.locals.courseNoteStore;

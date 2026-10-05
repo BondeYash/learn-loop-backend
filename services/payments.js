@@ -4,7 +4,8 @@ import { paymentOrderModel } from "../models/PaymentOrder.js";
 import { stripeEventModel } from "../models/StripeEvent.js";
 import User from "../models/User.js";
 import ApiError from "../utils/ApiError.js";
-import { requireCourseNomination } from "./courseAccess.js";
+import { requireCheckoutEligibility, courseEnrollment } from "./courseAccess.js";
+import { fulfillPublicPurchase } from "./publicEnrollment.js";
 import { ensureCourseReady } from "./courseReadiness.js";
 import { rupeesToMinor } from "./coursePricing.js";
 import { requireStripeSettings, trustedCheckoutUrl, checkoutOrigin, assertStripeEventMode } from "./stripeClient.js";
@@ -85,27 +86,28 @@ async function recoverLegacyCheckout(order, stripe, origin, PaymentOrder) {
 }
 
 export function publicOrder(order) {
-  return { id: String(order._id), courseId: String(order.course), title: order.title, amountMinor: order.amountMinor, currency: "inr", status: order.status, testMode: order.testMode, refundedMinor: order.refundedMinor, paidAt: order.paidAt, checkoutExpiresAt: order.checkoutExpiresAt };
+  return { id: String(order._id), courseId: String(order.course), title: order.title, amountMinor: order.amountMinor, currency: "inr", status: order.status, testMode: order.testMode, refundedMinor: order.refundedMinor, paidAt: order.paidAt, checkoutExpiresAt: order.checkoutExpiresAt, createdAt: order.createdAt, enrollmentType: order.publicEnrollmentRequestedAt ? "public" : order.enrollmentType || "assigned" };
 }
 export async function quoteCourse(courseId, user) {
-  const course = await requireCourseNomination(courseId, user);
-  const mode = stripeMode(), testMode = mode === "test";
+  const course = await requireCheckoutEligibility(courseId, user);
+  const mode = stripeMode(), testMode = mode === "test", enrollment = await courseEnrollment(course, user);
+  const enrollmentFields = { enrolled: Boolean(enrollment), enrollmentRequired: !enrollment, enrollmentType: course.visibility === "public" ? "public" : "assigned" };
   // A course explicitly made free never inherits an older pending paid quote.
   // Historical orders remain intact and can still be reconciled independently.
-  if (!course.price) return { courseId: String(course._id), title: course.title, amountMinor: 0, currency: "inr", testMode, paid: false, requiresPayment: false };
+  if (!course.price) return { courseId: String(course._id), title: course.title, amountMinor: 0, currency: "inr", testMode, paid: false, requiresPayment: false, ...enrollmentFields };
   const PaymentOrder = paymentOrderModel(mode);
   const existing = await PaymentOrder.findOne({ student: user._id, course: course._id, status: "paid", testMode });
   // Keep an expired-but-unreconciled attempt reachable so its owner can check
   // canonical Stripe status before opening a replacement checkout.
   const pending = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode });
-  return { courseId: String(course._id), title: course.title, amountMinor: pending?.amountMinor ?? rupeesToMinor(course.price), currency: "inr", testMode, paid: Boolean(existing), requiresPayment: course.price > 0 && !existing, ...(pending ? { pendingOrderId: String(pending._id) } : {}) };
+  return { courseId: String(course._id), title: course.title, amountMinor: pending?.amountMinor ?? rupeesToMinor(course.price), currentAmountMinor: rupeesToMinor(course.price), currency: "inr", testMode, paid: Boolean(existing), requiresPayment: course.price > 0 && !existing, ...enrollmentFields, ...(pending ? { pendingOrderId: String(pending._id) } : {}) };
 }
 
 export async function startCheckout(courseId, user, requestKey, quotedAmountMinor, stripe) {
   const { mode, testMode } = requireStripeSettings(), PaymentOrder = paymentOrderModel(mode);
   const origin = checkoutOrigin();
   if (typeof requestKey !== "string" || !/^[A-Za-z0-9_-]{16,80}$/.test(requestKey)) throw new ApiError(400, "Send a stable Idempotency-Key (16–80 letters, digits, underscores or hyphens) when retrying checkout.");
-  const course = await requireCourseNomination(courseId, user);
+  const course = await requireCheckoutEligibility(courseId, user);
   await ensureCourseReady(course._id);
   const amountMinor = rupeesToMinor(course.price);
   if (!amountMinor) throw new ApiError(409, "This course is free; no payment is needed.");
@@ -118,7 +120,7 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   if (!order) {
     if (quotedAmountMinor !== amountMinor) throw new ApiError(409, "The course price changed. Refresh the price before paying.");
     try {
-      const initial = { _id: new mongoose.Types.ObjectId(), student: user._id, course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", testMode, checkoutExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) };
+      const initial = { _id: new mongoose.Types.ObjectId(), student: user._id, course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", testMode, enrollmentType: course.visibility === "public" ? "public" : "assigned", checkoutExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) };
       initial.checkoutContract = newCheckoutContract(initial, origin);
       order = await PaymentOrder.findOneAndUpdate({ student: user._id, requestKey: hash, testMode }, { $setOnInsert: initial }, { upsert: true, new: true, runValidators: true }).select(SESSION_FIELDS);
     } catch (error) {
@@ -130,6 +132,11 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   if (quotedAmountMinor !== order.amountMinor) throw new ApiError(409, "An existing checkout uses an earlier course price. Refresh its payment status before continuing.");
   if (order.stripeSessionId && order.checkoutExpiresAt < new Date()) throw new ApiError(409, "This checkout attempt expired. Start a new attempt.");
   if (["paid", "refunded", "partially_refunded", "disputed", "reversed"].includes(order.status)) throw new ApiError(409, "This payment has finished or needs review. Refresh its status before starting another.");
+  if (course.visibility === "public" && !order.publicEnrollmentRequestedAt) {
+    // Deliberate public checkout can adopt an earlier owned attempt without
+    // changing its immutable Stripe request or opening another operation.
+    order = await PaymentOrder.findOneAndUpdate({ _id: order._id, student: user._id }, { $set: { publicEnrollmentRequestedAt: new Date() } }, { new: true }).select(SESSION_FIELDS);
+  }
   if (order.checkoutUrl) return { order: publicOrder(order), url: order.checkoutUrl };
   let session;
   if (!order.checkoutContract) {
@@ -162,7 +169,7 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   const saved = await PaymentOrder.findOneAndUpdate({ _id: order._id, $or: [{ stripeSessionId: { $exists: false } }, { stripeSessionId: session.id }] }, { $set: { stripeSessionId: session.id, checkoutUrl: session.url, checkoutExpiresAt: new Date(session.expires_at * 1000) } }, { new: true }).select(SESSION_FIELDS);
   if (!saved) throw new ApiError(409, "The payment attempt changed. Refresh before paying.");
   try {
-    const current = await requireCourseNomination(course._id, user);
+    const current = await requireCheckoutEligibility(course._id, user);
     if (!current.price || !await User.exists({ _id: user._id, status: "active", mustChangePassword: false, authVersion: user.authVersion || 0 })) throw new ApiError(409, "Course or account access changed while opening checkout.");
   } catch (error) {
     // If access changes while Stripe is opening the page, retire an unpaid
@@ -212,7 +219,8 @@ export async function reconcileOrder(orderId, sessionId, stripe, eventCreated) {
     const update = { status, active: ["pending", "failed"].includes(status), refundedMinor, stripeSessionId: session.id, ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}), ...(status === "paid" && !order.paidAt ? { paidAt: new Date() } : {}), ...(eventCreated ? { lastStripeEventAt: new Date(eventCreated * 1000) } : {}) };
     const saved = await PaymentOrder.findOneAndUpdate({ _id: order._id, reconciliationToken: token }, { $set: update }, { new: true });
     if (!saved) throw new ApiError(503, "Payment status changed. Retry shortly.");
-    // Access checks also require a current active assignment and published,
+    await fulfillPublicPurchase(saved);
+    // Access checks also require a current enrollment and published,
     // unarchived course. Never create assignments or reset learning progress here.
     return saved;
   } finally {

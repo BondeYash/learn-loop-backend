@@ -5,7 +5,7 @@ import mongoose from "mongoose";
 import Course from "../models/Course.js";
 import Enrollment from "../models/Enrollment.js";
 import VideoAsset from "../models/VideoAsset.js";
-import { catalogOutline, managesCourse, requireCourseAccess } from "../services/courseAccess.js";
+import { catalogOutline, managesCourse, requireCourseAccess, courseEnrollment, hasCourseEnrollment } from "../services/courseAccess.js";
 import Module from "../models/Module.js";
 import Lesson from "../models/Lesson.js";
 import { ensureCourseReady } from "../services/courseReadiness.js";
@@ -20,17 +20,17 @@ export const listCourses = asyncHandler(async (req, res) => {
   let filter = req.user.role === "admin" ? {} : { instructor: req.user._id };
   let assignments = [];
   if (req.user.role === "student") {
-    assignments = await Enrollment.find({ student: req.user._id, assignedBy: { $exists: true } }).select("course status");
+    assignments = await Enrollment.find({ student: req.user._id }).select("course status assignedBy publicFreeEnrollment publicPurchaseModes");
     filter = { isPublished: true };
   }
   filter.archivedAt = null;
   const courses = await Course.find(filter).populate("instructor", "name avatar").populate("category", "name slug").sort("-publishedAt");
   if (req.user.role !== "student") return new ApiResponse(res, 200, "Courses retrieved", { courses });
-  const assigned = new Map(assignments.map((item) => [String(item.course), item.status]));
+  const assigned = new Map(assignments.map((item) => [String(item.course), item]));
   const withPayments = await withCoursePayments(courses, req.user._id);
   return new ApiResponse(res, 200, "Courses retrieved", { courses: withPayments.map((course) => {
-    const status = assigned.get(String(course._id)) || null;
-    return { ...course, access: { assigned: Boolean(status), videos: Boolean(status) && !course.payment.required, status } };
+    const enrollment = assigned.get(String(course._id)), enrolled = hasCourseEnrollment(course, enrollment), status = enrolled ? enrollment.status : null;
+    return { ...course, access: { assigned: Boolean(enrollment?.assignedBy), enrolled, videos: enrolled && !course.payment.required, status } };
   }) });
 });
 export const getCourse = asyncHandler(async (req, res) => {
@@ -40,17 +40,17 @@ export const getCourse = asyncHandler(async (req, res) => {
   if (!course) throw new ApiError(404, "Course not found");
   if (course.archivedAt) throw new ApiError(410, "This course has been archived and is unavailable.");
   if (managesCourse(course, req.user)) {
-    return new ApiResponse(res, 200, "Course retrieved", { course, modules: await courseCurriculum(course._id), access: { assigned: true, videos: true } });
+    return new ApiResponse(res, 200, "Course retrieved", { course, modules: await courseCurriculum(course._id), access: { assigned: true, enrolled: true, videos: true } });
   }
   if (req.user.role !== "student" || !course.isPublished) throw new ApiError(403, "This course is not assigned to your account or is not published.");
-  const assigned = Boolean(await Enrollment.exists({ student: req.user._id, course: course._id, assignedBy: { $exists: true } }));
-  if (!assigned) {
-    return new ApiResponse(res, 200, "Course retrieved", { course, modules: catalogOutline(await courseCurriculum(course._id)), access: { assigned: false, videos: false } });
+  const enrollment = await courseEnrollment(course, req.user);
+  if (!enrollment) {
+    return new ApiResponse(res, 200, "Course retrieved", { course, modules: catalogOutline(await courseCurriculum(course._id)), access: { assigned: false, enrolled: false, videos: false } });
   }
   await requireCourseAccess(course._id, req.user);
   const modules = await courseCurriculum(course._id);
   for (const module of modules) module.lessons = module.lessons.filter((lesson) => lesson.contentType === "text" || lesson.video?.status === "ready");
-  return new ApiResponse(res, 200, "Course retrieved", { course, modules, access: { assigned: true, videos: true } });
+  return new ApiResponse(res, 200, "Course retrieved", { course, modules, access: { assigned: Boolean(enrollment.assignedBy), enrolled: true, videos: true } });
 });
 export const myCourses = asyncHandler(async (req, res) => {
   const filter = { ...(req.user.role === "admin" ? {} : { instructor: req.user._id }), archivedAt: req.query.archived === "true" ? { $ne: null } : null };

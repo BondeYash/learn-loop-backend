@@ -1,4 +1,5 @@
-import { param } from "express-validator";
+import { body, param } from "express-validator";
+import { enrollInPublicCourse } from "../controllers/enrollmentController.js";
 import { listNotes, uploadNote, noteLink, removeNote, ownNoteCourse } from "../controllers/courseNoteController.js";
 import { limitNoteUploads, parseNoteUpload } from "../middleware/noteUpload.js";
 import { restoreArchivedCourse } from "../controllers/courseController.js";
@@ -16,6 +17,7 @@ router.get("/mine/:id", protect, authorize("instructor", "admin"), courseIdValid
 router.get("/admin/all", protect, authorize("admin"), adminCourses);
 router.post("/", protect, authorize("instructor", "admin"), createCourseValidator, createCourse);
 router.get("/:id", protect, getCourse);
+router.post("/:id/enroll", protect, authorize("student"), courseIdValidator, body("quotedAmountMinor").isInt({ min: 0, max: 99999999 }).toInt(), validate, enrollInPublicCourse);
 router.patch("/:id", protect, authorize("instructor", "admin"), updateCourseValidator, updateCourse); router.delete("/:id", protect, authorize("instructor", "admin"), courseIdValidator, deleteCourse);
 router.post("/:id/restore", protect, authorize("instructor", "admin"), courseIdValidator, restoreArchivedCourse);
 router.patch("/:id/publish", protect, authorize("instructor", "admin"), publishValidator, setPublished);
