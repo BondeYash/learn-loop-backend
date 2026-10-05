@@ -1,5 +1,7 @@
 # LessonLoop backend
 
+Instructor/admin-authored chapter quizzes and timed course mock tests, protected attempts, server scoring, results and own history are documented in [assessments](docs/assessments.md). No assessment content is seeded.
+
 LessonLoop supports government-exam learning with a deliberately public course catalog and selected samples alongside protected learning content. Existing courses stay private by default. Read [public discovery, privacy controls and rollout](docs/public-discovery.md) for discovery behavior and [public enrollment](docs/public-enrollment.md) for self-service access.
 
 ## Admin and course management release

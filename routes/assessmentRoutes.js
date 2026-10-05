@@ -1,0 +1,17 @@
+import { Router } from "express";
+import { param } from "express-validator";
+import { protect, authorize } from "../middleware/auth.js";
+import { validate } from "../validators/authValidators.js";
+import { answerAttempt, attemptHistory, getAttempt, listAssessments, manageAssessments, saveAssessment, startAttempt, submitAttempt } from "../controllers/assessmentController.js";
+const router = Router(), owner = [protect, authorize("instructor", "admin")], student = [protect, authorize("student")];
+const ids = (...names) => [...names.map((n) => param(n).isMongoId()), validate];
+router.get("/courses/:courseId/assessments/manage", ...owner, ...ids("courseId"), manageAssessments);
+router.post("/courses/:courseId/assessments", ...owner, ...ids("courseId"), saveAssessment);
+router.put("/courses/:courseId/assessments/:id", ...owner, ...ids("courseId", "id"), saveAssessment);
+router.get("/courses/:courseId/assessments", ...student, ...ids("courseId"), listAssessments);
+router.get("/courses/:courseId/assessment-attempts", ...student, ...ids("courseId"), attemptHistory);
+router.post("/assessments/:id/attempts", ...student, ...ids("id"), startAttempt);
+router.get("/assessment-attempts/:id", ...student, ...ids("id"), getAttempt);
+router.put("/assessment-attempts/:id/answers", ...student, ...ids("id"), answerAttempt);
+router.post("/assessment-attempts/:id/submit", ...student, ...ids("id"), submitAttempt);
+export default router;

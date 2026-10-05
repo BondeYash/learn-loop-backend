@@ -18,6 +18,7 @@ import adminRoutes from "./routes/adminRoutes.js";
 import { auditAdminMutations } from "./middleware/adminAudit.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
 import publicCourseRoutes from "./routes/publicCourseRoutes.js";
+import assessmentRoutes from "./routes/assessmentRoutes.js";
 import { stripeWebhook } from "./controllers/paymentController.js";
 
 const app = express();
@@ -73,6 +74,7 @@ app.use("/api", auditAdminMutations);
 app.use("/api/admin", adminRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/public", publicCourseRoutes);
+app.use("/api", assessmentRoutes);
 app.use("/api", videoRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/courses", courseRoutes);
