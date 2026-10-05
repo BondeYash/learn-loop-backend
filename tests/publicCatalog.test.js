@@ -43,15 +43,24 @@ test("anonymous discovery and selected samples stay separate from private learni
     const video = await VideoAsset.create({ owner: users.owner.id, course: course._id, lesson: videoLesson._id, fingerprint: "synthetic", size: 100, chunkSize: 0, chunkCount: 0, status: "ready", storageProvider: "r2", uploadMode: "direct", objectKey: "private/selected.mp4", storageBucket: "PRIVATE_BUCKET", expiresAt: new Date(Date.now() + 3600000) });
     await Lesson.updateOne({ _id: videoLesson._id }, { video: video._id });
     const endpoint = `/public/courses/${course._id}`;
-    await t.test("only explicitly public, published, unarchived inventory is anonymous; legacy documents stay private", async () => {
+    await t.test("all published unarchived metadata is discoverable; private and legacy enrollment stays restricted", async () => {
       const list = await call("/public/courses"); assert.equal(list.status, 200); assert.equal(list.headers.get("cache-control"), "private, no-store");
-      assert.equal(list.body.data.total, 1); assert.equal(list.body.data.courses[0].amountMinor, 12050); assert.equal(list.body.data.categories.length, 1); assert.equal(list.body.data.categories[0].name, category.name);
+      assert.equal(list.body.data.total, 3); assert.equal(list.body.data.courses.find((item) => item.id === String(course._id)).amountMinor, 12050); assert.equal(list.body.data.categories.length, 2);
+      for (const item of hidden.slice(0, 2)) {
+        const card = list.body.data.courses.find((entry) => entry.id === String(item._id));
+        assert.deepEqual(card.availability, { enrollment: "assignment", ready: false }); assert.equal(card.hasPreview, false);
+        for (const id of [item._id, item.slug]) assert.equal((await call(`/public/courses/${id}`)).status, 200);
+        assert.equal((await call(`/public/courses/${item._id}/preview`)).status, 404);
+        assert.equal((await call(`/courses/${item._id}/enroll`, users.student.cookie, "POST", { quotedAmountMinor: 0 })).status, 404);
+        assert.equal((await call(`/payments/courses/${item._id}/quote`, users.student.cookie)).status, 403);
+        for (const suffix of ["/notes", "/progress", "/assessments"]) assert.equal((await call(`/courses/${item._id}${suffix}`, users.student.cookie)).status, 403);
+      }
       assert.equal((await call(`/public/courses/${course.slug}`)).status, 200);
-      for (const item of hidden) for (const id of [item._id, item.slug]) for (const suffix of ["", "/preview", "/thumbnail"]) assert.equal((await call(`/public/courses/${id}${suffix}`)).status, 404);
+      for (const item of hidden.slice(2)) for (const id of [item._id, item.slug]) for (const suffix of ["", "/preview", "/thumbnail"]) assert.equal((await call(`/public/courses/${id}${suffix}`)).status, 404);
       assert.equal((await call("/public/courses?q=ccc")).body.data.total, 1);
       assert.equal((await call("/public/courses?q=.*")).body.data.total, 0);
-      assert.equal((await call(`/public/courses?category=${hiddenCategory._id}`)).body.data.total, 0);
-      assert.equal((await call("/public/courses?page=2&limit=1")).body.data.courses.length, 0);
+      assert.equal((await call(`/public/courses?category=${hiddenCategory._id}`)).body.data.total, 2);
+      assert.equal((await call("/public/courses?page=2&limit=1")).body.data.courses.length, 1);
       for (const query of ["page=-1", "page=1.5", "limit=51", "category=invalid", "q=" + "x".repeat(101)]) assert.equal((await call("/public/courses?" + query)).status, 400);
     });
     await t.test("public DTOs exclude account profiles, keys, full lesson bodies and legacy preview flags", async () => {
@@ -74,8 +83,10 @@ test("anonymous discovery and selected samples stay separate from private learni
       const foreign = await Lesson.create({ course: hidden[0]._id, module: foreignModule._id, title: "Foreign sample", contentType: "text", content: "Foreign text", order: 0 });
       assert.equal((await call(`/courses/${course._id}`, users.owner.cookie, "PATCH", { previewLesson: foreign._id })).status, 400);
       await VideoAsset.updateOne({ _id: video._id }, { status: "uploading" });
+      assert.equal((await call(endpoint)).body.data.course.availability.ready, false);
       assert.equal((await call(`/courses/${course._id}`, users.owner.cookie, "PATCH", { previewLesson: videoLesson._id })).status, 400);
       await VideoAsset.updateOne({ _id: video._id }, { status: "ready", lesson: locked._id });
+      assert.equal((await call(endpoint)).body.data.course.availability.ready, true);
       assert.equal((await call(`/courses/${course._id}`, users.owner.cookie, "PATCH", { previewLesson: videoLesson._id })).status, 400);
       await VideoAsset.updateOne({ _id: video._id }, { lesson: videoLesson._id });
       assert.equal((await call(`/courses/${course._id}/lessons/${text._id}`, users.owner.cookie, "PATCH", { content: "x".repeat(50001) })).status, 400);
@@ -92,8 +103,17 @@ test("anonymous discovery and selected samples stay separate from private learni
       assert.equal((await call(endpoint)).body.data.course.policies.refund, "");
       assert.equal((await call(`/courses/${course._id}`, users.owner.cookie, "PATCH", { supportEmail: "invalid" })).status, 400);
     });
-    await t.test("retraction, unpublication, archive and mid-request changes stop fresh public links", async () => {
-      for (const changes of [{ visibility: "private" }, { isPublished: false }, { archivedAt: new Date() }]) {
+    await t.test("private enrollment hides samples; unpublication and archive hide metadata and media", async () => {
+      await Course.updateOne({ _id: course._id }, { visibility: "private" });
+      const privateDetail = await call(endpoint); assert.equal(privateDetail.status, 200);
+      assert.deepEqual(privateDetail.body.data.course.availability, { enrollment: "assignment", ready: true });
+      assert.equal(privateDetail.body.data.course.hasPreview, false);
+      assert.ok(privateDetail.body.data.modules.flatMap((module) => module.lessons).every((lesson) => !lesson.preview && !lesson.content && !lesson.video));
+      assert.equal((await call(endpoint + "/preview")).status, 404);
+      assert.equal((await call(endpoint + "/thumbnail", null, "GET", null, true)).status, 200);
+      assert.equal((await call(`/courses/${course._id}/enroll`, users.student.cookie, "POST", { quotedAmountMinor: 12050 })).status, 404);
+      await Course.updateOne({ _id: course._id }, { visibility: "public" });
+      for (const changes of [{ isPublished: false }, { archivedAt: new Date() }]) {
         await Course.updateOne({ _id: course._id }, changes);
         for (const suffix of ["", "/preview", "/thumbnail"]) assert.equal((await call(endpoint + suffix)).status, 404);
         await Course.updateOne({ _id: course._id }, { visibility: "public", isPublished: true, archivedAt: null });
