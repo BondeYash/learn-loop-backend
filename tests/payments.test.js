@@ -91,7 +91,7 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
   const access=async(expected,user="student")=>{
     for(const [path,method,body] of [[`/courses/${course._id}`,"GET"],[`/lessons/${videoLesson._id}/playback`,"GET"],[`/courses/${course._id}/notes`,"GET"],[`/courses/${course._id}/notes/${note._id}/url`,"GET"],[`/courses/${course._id}/progress`,"GET"],[`/lessons/${textLesson._id}/complete`,"POST",{}]]){
       const r=await call(path,users[user].cookie,method,body);
-      const catalog=method==="GET"&&path===`/courses/${course._id}`&&users[user].role==="student"&&expected===403;
+      const catalog=method==="GET"&&path===`/courses/${course._id}`&&users[user].role==="student"&&expected===403&&Boolean(await Course.exists({_id:course._id,isPublished:true,archivedAt:null}));
       assert.equal(r.status,catalog?200:users[user].role!=="student"&&(path.endsWith("/progress")||path.endsWith("/complete"))?403:expected,`${method} ${path}: ${JSON.stringify(r.body)}`);
       if(catalog){assert.equal(r.body.data.access.assigned,false);assert.equal(r.body.data.access.videos,false);assert.equal(JSON.stringify(r.body).includes("Private course content"),false);assert.ok(r.body.data.modules.flatMap(m=>m.lessons).every(l=>!l.content&&!l.video));}
     }

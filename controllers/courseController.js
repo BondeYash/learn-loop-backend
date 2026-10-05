@@ -11,8 +11,9 @@ import Lesson from "../models/Lesson.js";
 import { ensureCourseReady } from "../services/courseReadiness.js";
 import { archiveCourse, restoreCourse, courseCurriculum, ensureCategory, requireCourseOwner } from "../services/courseService.js";
 import { withCoursePayments } from "../services/coursePayments.js";
+import { publicCourseFields, validatePublicCourseChanges } from "../services/publicCatalog.js";
 
-const allowedFields = ["title", "description", "category", "price", "level", "language", "requirements", "learningOutcomes"];
+const allowedFields = ["title", "description", "category", "price", "level", "language", "requirements", "learningOutcomes", ...publicCourseFields];
 const pickCourseFields = (body) => Object.fromEntries(allowedFields.filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
 
 export const listCourses = asyncHandler(async (req, res) => {
@@ -67,7 +68,8 @@ export const getMyCourse = asyncHandler(async (req, res) => {
 });
 export const createCourse = asyncHandler(async (req, res) => {
   await ensureCategory(req.body.category);
-  const course = await Course.create({ ...pickCourseFields(req.body), instructor: req.user._id });
+  const changes = pickCourseFields(req.body), course = new Course({ ...changes, instructor: req.user._id });
+  await validatePublicCourseChanges(course, changes); await course.save();
   if (req.body.setupLessons === true) await Module.create({ course: course._id, title: "Lessons", order: 0 });
   return new ApiResponse(res, 201, "Course created. Add content, then assign it to students.", { course });
 });
@@ -75,6 +77,7 @@ export const updateCourse = asyncHandler(async (req, res) => {
   const course = await requireCourseOwner(req.params.id, req.user);
   const changes = pickCourseFields(req.body);
   if (changes.category) await ensureCategory(changes.category);
+  await validatePublicCourseChanges(course, changes);
   Object.assign(course, changes); await course.save();
   return new ApiResponse(res, 200, "Course updated", { course });
 });
@@ -102,7 +105,7 @@ export const setPublished = asyncHandler(async (req, res) => {
 });
 export const addModule = asyncHandler(async (req, res) => { const course = await requireCourseOwner(req.params.id, req.user); const last = await Module.findOne({ course: course._id }).sort("-order"); const count = last ? last.order + 1 : 0; const module = await Module.create({ course: course._id, title: req.body.title, order: req.body.order ?? count }); return new ApiResponse(res, 201, "Module added", { module }); });
 export const updateModule = asyncHandler(async (req, res) => { const module = await Module.findById(req.params.moduleId); if (!module || module.course.toString() !== req.params.id) throw new ApiError(404, "Module not found"); await requireCourseOwner(req.params.id, req.user); if (req.body.title !== undefined) module.title = req.body.title; if (req.body.order !== undefined) module.order = req.body.order; await module.save(); return new ApiResponse(res, 200, "Module updated", { module }); });
-export const deleteModule = asyncHandler(async (req, res) => { const module = await Module.findById(req.params.moduleId); if (!module || module.course.toString() !== req.params.id) throw new ApiError(404, "Module not found"); await requireCourseOwner(req.params.id, req.user); const lessons = await Lesson.find({ module: module._id }).select("_id"); await VideoAsset.updateMany({ lesson: { $in: lessons.map((l) => l._id) } }, { status: "cancelled" }); await Lesson.deleteMany({ module: module._id }); await module.deleteOne(); return new ApiResponse(res, 200, "Module and its lessons deleted", {}); });
+export const deleteModule = asyncHandler(async (req, res) => { const module = await Module.findById(req.params.moduleId); if (!module || module.course.toString() !== req.params.id) throw new ApiError(404, "Module not found"); await requireCourseOwner(req.params.id, req.user); const lessons = await Lesson.find({ module: module._id }).select("_id"); await VideoAsset.updateMany({ lesson: { $in: lessons.map((l) => l._id) } }, { status: "cancelled" }); await Course.updateOne({ _id: req.params.id, previewLesson: { $in: lessons.map((l) => l._id) } }, { $set: { previewLesson: null } }); await Lesson.deleteMany({ module: module._id }); await module.deleteOne(); return new ApiResponse(res, 200, "Module and its lessons deleted", {}); });
 export const addLesson = asyncHandler(async (req, res) => { const module = await Module.findById(req.params.moduleId); if (!module || module.course.toString() !== req.params.id) throw new ApiError(404, "Module not found"); await requireCourseOwner(req.params.id, req.user); const last = await Lesson.findOne({ module: module._id }).sort("-order"); const count = last ? last.order + 1 : 0; const lesson = await Lesson.create({ title: req.body.title, contentType: req.body.contentType || "video", content: req.body.content || "", course: module.course, module: module._id, order: req.body.order ?? count }); return new ApiResponse(res, 201, "Lesson added", { lesson }); });
 export const updateLesson = asyncHandler(async (req, res) => { const lesson = await Lesson.findById(req.params.lessonId); if (!lesson || lesson.course.toString() !== req.params.id) throw new ApiError(404, "Lesson not found"); await requireCourseOwner(req.params.id, req.user); const fields = ["title", "contentType", "content", "duration", "order", "isPreview"]; fields.forEach((field) => { if (req.body[field] !== undefined) lesson[field] = req.body[field]; }); await lesson.save(); return new ApiResponse(res, 200, "Lesson updated", { lesson }); });
-export const deleteLesson = asyncHandler(async (req, res) => { const lesson = await Lesson.findById(req.params.lessonId); if (!lesson || lesson.course.toString() !== req.params.id) throw new ApiError(404, "Lesson not found"); await requireCourseOwner(req.params.id, req.user); await VideoAsset.updateMany({ lesson: lesson._id }, { status: "cancelled" }); await lesson.deleteOne(); return new ApiResponse(res, 200, "Lesson deleted", {}); });
+export const deleteLesson = asyncHandler(async (req, res) => { const lesson = await Lesson.findById(req.params.lessonId); if (!lesson || lesson.course.toString() !== req.params.id) throw new ApiError(404, "Lesson not found"); await requireCourseOwner(req.params.id, req.user); await VideoAsset.updateMany({ lesson: lesson._id }, { status: "cancelled" }); await Course.updateOne({ _id: req.params.id, previewLesson: lesson._id }, { $set: { previewLesson: null } }); await lesson.deleteOne(); return new ApiResponse(res, 200, "Lesson deleted", {}); });

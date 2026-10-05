@@ -1,5 +1,7 @@
 # LessonLoop backend
 
+LessonLoop supports government-exam learning with a deliberately public course catalog and selected samples alongside protected learning content. Existing courses stay private by default. Read [public discovery, privacy controls and rollout](docs/public-discovery.md) for Stage 1 behavior; self-service public enrollment follows separately.
+
 ## Admin and course management release
 
 Public signup creates students only. Administrators provision instructors with expiring temporary passwords and mandatory password change, review users/courses/videos/activity, pause or restore account access, and transfer course ownership. Course deletion is recoverable archive; restore returns a draft with lessons, media, assignments and progress preserved. Existing accounts are not automatically changed.
