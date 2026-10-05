@@ -29,6 +29,6 @@ Own history aggregates explicit tags from the latest 100 ended attempts. Tags be
 
 No seed, data migration, payment-provider change or external service is introduced. Startup awaits initialization of the new assessment/attempt collections and unique indexes before serving requests, following the existing payment-model startup pattern. The frontend and backend increments must both be deployed for these pages to work. Local tests and GitHub publication do not verify a hosted authentication session or deployed assessment APIs.
 
-Practical exercises, richer continue-learning/progress, doubt support, instructor attempt analytics, negative marking and assessment deletion are pending.
+Practical exercises, saved learning place/current progress and private questions are now delivered in [learning support](learning-support.md). Instructor attempt analytics, negative marking and assessment deletion remain outside these stages.
 
 On 2026-10-05, the full isolated backend suite passed all 114 tests. A final focused assessment rerun passed all 9 tests after startup was changed to await assessment/attempt model initialization. Frontend lint/unit/build/dry-run and isolated assessment/public/payment/player browser flows also passed. These checks did not create production course or assessment data.

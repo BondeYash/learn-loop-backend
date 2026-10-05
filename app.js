@@ -20,6 +20,7 @@ import paymentRoutes from "./routes/paymentRoutes.js";
 import publicCourseRoutes from "./routes/publicCourseRoutes.js";
 import assessmentRoutes from "./routes/assessmentRoutes.js";
 import learningSupportRoutes from "./routes/learningSupportRoutes.js";
+import acquisitionRoutes from "./routes/acquisitionRoutes.js";
 import { stripeWebhook } from "./controllers/paymentController.js";
 
 const app = express();
@@ -74,6 +75,7 @@ app.get("/api/health", (req, res) => {
 app.use("/api", auditAdminMutations);
 app.use("/api/admin", adminRoutes);
 app.use("/api/payments", paymentRoutes);
+app.use("/api", acquisitionRoutes);
 app.use("/api/public", publicCourseRoutes);
 app.use("/api", assessmentRoutes);
 app.use("/api", learningSupportRoutes);

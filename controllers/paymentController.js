@@ -7,6 +7,8 @@ import { handlePaymentEvent, publicOrder, quoteCourse, reconcileOrder, startChec
 import { reportPaymentFailure } from "../services/paymentDiagnostics.js";
 import { stripeMode } from "../services/stripeMode.js";
 import { requireCourseAccess } from "../services/courseAccess.js";
+import Course from "../models/Course.js";
+import { captureAttribution } from "../services/acquisition.js";
 
 async function orderView(order, user) {
   let canAccess = false;
@@ -23,7 +25,11 @@ export const paymentHistory = asyncHandler(async (req, res) => {
 
 const clientFor = (req) => process.env.NODE_ENV === "test" && req.app.locals.stripeClient ? req.app.locals.stripeClient : stripeClient();
 export const paymentQuote = asyncHandler(async (req, res) => new ApiResponse(res, 200, "INR course price", { quote: await quoteCourse(req.params.courseId, req.user), readiness: stripeReadiness() }));
-export const checkout = asyncHandler(async (req, res) => new ApiResponse(res, 201, "Stripe checkout created", await startCheckout(req.body.courseId, req.user, req.get("Idempotency-Key"), req.body.quotedAmountMinor, clientFor(req))));
+export const checkout = asyncHandler(async (req, res) => {
+  const result = await startCheckout(req.body.courseId, req.user, req.get("Idempotency-Key"), req.body.quotedAmountMinor, clientFor(req));
+  if (result.order?.testMode === false && req.body.attribution?.consent === true) { try { await captureAttribution(await Course.findById(req.body.courseId), req.user, req.body.attribution); } catch { /* Elective only. */ } }
+  return new ApiResponse(res, 201, "Stripe checkout created", result);
+});
 export const orderStatus = asyncHandler(async (req, res) => {
   const order = await paymentOrderModel().findOne({ _id: req.params.orderId, student: req.user._id });
   if (!order) throw new ApiError(404, "Payment order not found");

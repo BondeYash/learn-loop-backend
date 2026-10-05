@@ -17,6 +17,7 @@ import CourseNote from "../models/CourseNote.js";
 import { paymentOrderModel } from "../models/PaymentOrder.js";
 import { stripeEventModel } from "../models/StripeEvent.js";
 import AuditEvent from "../models/AuditEvent.js";
+import { acquisitionModels, AcquisitionConfig, AcquisitionChoice, SourceLink } from "../models/Acquisition.js";
 import { rupeesToMinor } from "../services/coursePricing.js";
 import { stripeReadiness, STRIPE_API_VERSION, trustedCheckoutUrl, validateStripeStartup } from "../services/stripeClient.js";
 
@@ -309,11 +310,16 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
       const made=await call("/courses",users.teacher.cookie,"POST",{title:"Explicitly free course",description:"Fixture",category:String(category._id),price:0});assert.equal(made.status,201);assert.equal(made.body.data.course.price,0);
     });
     await t.test("public paid checkout requires canonical settlement and automatically enrolls once; history is private and mode-scoped",async()=>{
-      await Course.updateOne({_id:course._id},{visibility:"public",price:123.45,isPublished:true});
+      await Promise.all(acquisitionModels.map(model=>model.init()));
+      await Course.updateOne({_id:course._id},{visibility:"public",price:123.45,isPublished:true,privacyPolicyUrl:"https://example.invalid/privacy"});
+      await AcquisitionConfig.create({course:course._id,measurementEnabled:true,reviewedPolicyUrl:"https://example.invalid/privacy"});
+      const source=await SourceLink.create({course:course._id,slot:0,channel:"referral",label:"generic-course",code:"abcdef123456",requestToken:crypto.createHash("sha256").update(crypto.randomUUID()).digest("hex")}),attribution={consent:true,sourceCode:source.code};
       const quote=(await call(`/payments/courses/${course._id}/quote`,users.stranger.cookie)).body.data.quote;
       assert.equal(quote.enrollmentRequired,true);assert.equal(quote.requiresPayment,true);await access(403,"stranger");
-      assert.equal((await call(`/courses/${course._id}/enroll`,users.stranger.cookie,"POST",{quotedAmountMinor:12345,paid:true,assignedBy:String(users.teacher.id)})).status,402);
-      const key=crypto.randomUUID(),created=await create("stranger",key);assert.equal(created.status,201,JSON.stringify(created.body));
+      assert.equal((await call(`/courses/${course._id}/enroll`,users.stranger.cookie,"POST",{quotedAmountMinor:12345,paid:true,assignedBy:String(users.teacher.id),attribution})).status,402);
+      assert.equal(await AcquisitionChoice.countDocuments({student:users.stranger.id}),0);
+      const key=crypto.randomUUID(),created=await create("stranger",key,12345,{attribution});assert.equal(created.status,201,JSON.stringify(created.body));
+      assert.equal(await AcquisitionChoice.countDocuments({student:users.stranger.id}),testMode?0:1);
       const duplicate=await create("stranger",key);assert.equal(duplicate.body.data.order.id,created.body.data.order.id);
       const row=await PaymentOrder.findById(created.body.data.order.id);assert.equal(row.enrollmentType,"public");
       assert.equal(await Enrollment.countDocuments({student:users.stranger.id,course:course._id}),0);
@@ -323,6 +329,8 @@ for (const mode of ["test", "live"]) test(`Stripe ${mode} payments, real signatu
       assert.equal((await webhook(event("checkout.session.completed",session))).status,409);await access(403,"stranger");intent.metadata=session.metadata;
       const settled=event("checkout.session.completed",session);assert.equal((await webhook(settled)).status,200);assert.equal((await webhook(settled)).body.duplicate,true);await access(200,"stranger");
       const enrollment=await Enrollment.findOne({student:users.stranger.id,course:course._id});assert.equal(enrollment.assignedBy,undefined);assert.deepEqual([...enrollment.publicPurchaseModes],[mode]);
+      assert.equal((await call(`/courses/${course._id}/enroll`,users.stranger.cookie,"POST",{quotedAmountMinor:12345,attribution})).status,200);
+      assert.equal(await AcquisitionChoice.countDocuments({student:users.stranger.id}),testMode?0:1);
       assert.equal(await Enrollment.countDocuments({student:users.stranger.id,course:course._id}),1);
       const record=await call(`/payments/orders/${row._id}`,users.stranger.cookie);assert.equal(record.body.data.order.canAccess,true);
       assert.equal((await call(`/payments/orders/${row._id}`,users.second.cookie)).status,404);

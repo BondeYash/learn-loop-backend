@@ -10,6 +10,7 @@ import CourseNote from "../models/CourseNote.js";
 import Assessment from "../models/Assessment.js";
 import AssessmentAttempt from "../models/AssessmentAttempt.js";
 import { PracticalTask, PracticalRecord, CourseQuestion } from "../models/LearningSupport.js";
+import { acquisitionModels } from "../models/Acquisition.js";
 import VideoAsset from "../models/VideoAsset.js";
 import { r2Client } from "./videoObjectStore.js";
 
@@ -66,6 +67,7 @@ export async function purgeCourse(courseId) {
     PracticalTask.deleteMany({ course: course._id }),
     PracticalRecord.deleteMany({ course: course._id }),
     CourseQuestion.deleteMany({ course: course._id }),
+    ...acquisitionModels.map((model) => model.deleteMany({ course: course._id })),
     VideoAsset.deleteMany({ course: course._id }),
   ]);
   const removed = await Course.deleteOne({ _id: course._id });

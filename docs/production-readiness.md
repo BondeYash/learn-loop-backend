@@ -22,6 +22,8 @@ Effort ranges below are planning estimates for one experienced engineer, excludi
 | P1 | Learner UX/accessibility. No caption tracks, persistent playback position, error boundary or accessibility audit; course polls every 15s. | Keyboard/mobile/screen-reader review, captions/transcripts process, non-destructive transient errors, visibility-aware polling, resume-position decision. | 2–4 days |
 | P2 | Dependency maintenance and features driven by demand. Deprecated packages remain; audit found zero known production vulnerabilities on 2026-10-01. | Remove unused/deprecated dependencies with regression checks. Adaptive bitrate, resumable multipart uploads, quizzes, certificates and payments only when required. Course completion is self-reported, not proof of watched time. | Scope separately |
 
+Updated 2026-10-05: see [staged completion and current launch gaps](staged-release.md). Assessments, payments, saved learning position and optional acquisition are implemented; descriptions above of those features being absent are historical. The full backend suite now passes 132 tests. Actual provider configuration, hosted acceptance and operational evidence remain open.
+
 ## Authentication provider decision
 
 **Existing Mongo auth + Resend (or another transactional provider):** preserves IDs, course relationships and the current cookie flow. Mail delivery does not itself provide invitations or verification; implement and test tokens, redemption, roles and recovery in this backend. Use the provider's verified sending domain and bounded delivery flow. This is the lower-disruption option for this codebase, not a completed selection.
