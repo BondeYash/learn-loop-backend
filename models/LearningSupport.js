@@ -1,0 +1,15 @@
+import mongoose from "mongoose";
+const oid = (ref) => ({ type: mongoose.Schema.Types.ObjectId, ref, required: true });
+const task = new mongoose.Schema({ course: oid("Course"), lesson: { type: mongoose.Schema.Types.ObjectId, ref: "Lesson", default: null }, slot: { type: Number, min: 0, max: 39, required: true }, title: String, instructions: String, checklist: [String], active: { type: Boolean, default: true }, version: { type: Number, default: 1 } }, { timestamps: true });
+task.index({ course: 1, slot: 1 }, { unique: true });
+export const PracticalTask = mongoose.model("PracticalTask", task);
+const record = new mongoose.Schema({ course: oid("Course"), task: oid("PracticalTask"), student: oid("User"), taskVersion: Number, taskTitle: String, response: String, checked: [Boolean], completed: Boolean, completedAt: Date, requestId: String, revision: { type: Number, default: 1 } }, { timestamps: true });
+record.index({ task: 1, student: 1, taskVersion: 1 }, { unique: true });
+record.index({ course: 1, updatedAt: -1 });
+export const PracticalRecord = mongoose.model("PracticalRecord", record);
+const reply = new mongoose.Schema({ text: String, name: String, requestId: String, createdAt: Date }, { _id: false });
+const question = new mongoose.Schema({ course: oid("Course"), student: oid("User"), lesson: { type: mongoose.Schema.Types.ObjectId, ref: "Lesson", default: null }, slot: { type: Number, min: 0, max: 49, required: true }, text: String, replies: [reply], resolved: { type: Boolean, default: false }, version: { type: Number, default: 1 }, requestId: String }, { timestamps: true });
+question.index({ course: 1, student: 1, slot: 1 }, { unique: true });
+question.index({ course: 1, student: 1, requestId: 1 }, { unique: true });
+question.index({ course: 1, updatedAt: -1 });
+export const CourseQuestion = mongoose.model("CourseQuestion", question);

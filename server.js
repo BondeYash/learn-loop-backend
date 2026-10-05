@@ -9,6 +9,8 @@ import Category from "./models/Category.js";
 import CourseNote from "./models/CourseNote.js";
 import Assessment from "./models/Assessment.js";
 import AssessmentAttempt from "./models/AssessmentAttempt.js";
+import { PracticalTask, PracticalRecord, CourseQuestion } from "./models/LearningSupport.js";
+import Progress from "./models/Progress.js";
 import { paymentOrderModel } from "./models/PaymentOrder.js";
 import { stripeEventModel } from "./models/StripeEvent.js";
 import { validateStripeStartup } from "./services/stripeClient.js";
@@ -21,6 +23,7 @@ const startServer = async () => {
   await checkObjectStore();
   await CourseNote.init();
   await Promise.all([Assessment.init(), AssessmentAttempt.init()]);
+  await Promise.all([PracticalTask.init(), PracticalRecord.init(), CourseQuestion.init(), Progress.init()]);
   await Promise.all([paymentOrderModel().init(), stripeEventModel().init()]);
   await Category.updateOne({ slug: "general" }, { $setOnInsert: { name: "General", slug: "general" } }, { upsert: true });
   let stopWorker = () => {};

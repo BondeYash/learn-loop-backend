@@ -12,6 +12,7 @@ import { ensureCourseReady } from "../services/courseReadiness.js";
 import { archiveCourse, restoreCourse, courseCurriculum, ensureCategory, requireCourseOwner } from "../services/courseService.js";
 import { withCoursePayments } from "../services/coursePayments.js";
 import { publicCourseFields, validatePublicCourseChanges } from "../services/publicCatalog.js";
+import { currentProgress } from "../services/currentProgress.js";
 
 const allowedFields = ["title", "description", "category", "price", "level", "language", "requirements", "learningOutcomes", ...publicCourseFields];
 const pickCourseFields = (body) => Object.fromEntries(allowedFields.filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
@@ -20,7 +21,7 @@ export const listCourses = asyncHandler(async (req, res) => {
   let filter = req.user.role === "admin" ? {} : { instructor: req.user._id };
   let assignments = [];
   if (req.user.role === "student") {
-    assignments = await Enrollment.find({ student: req.user._id }).select("course status assignedBy publicFreeEnrollment publicPurchaseModes");
+    assignments = await Enrollment.find({ student: req.user._id }).select("student course status assignedBy publicFreeEnrollment publicPurchaseModes");
     filter = { isPublished: true };
   }
   filter.archivedAt = null;
@@ -28,9 +29,10 @@ export const listCourses = asyncHandler(async (req, res) => {
   if (req.user.role !== "student") return new ApiResponse(res, 200, "Courses retrieved", { courses });
   const assigned = new Map(assignments.map((item) => [String(item.course), item]));
   const withPayments = await withCoursePayments(courses, req.user._id);
+  const progress = await currentProgress(assignments);
   return new ApiResponse(res, 200, "Courses retrieved", { courses: withPayments.map((course) => {
-    const enrollment = assigned.get(String(course._id)), enrolled = hasCourseEnrollment(course, enrollment), status = enrolled ? enrollment.status : null;
-    return { ...course, access: { assigned: Boolean(enrollment?.assignedBy), enrolled, videos: enrolled && !course.payment.required, status } };
+    const enrollment = assigned.get(String(course._id)), enrolled = hasCourseEnrollment(course, enrollment), saved = progress.get(`${req.user._id}:${course._id}`), videos = enrolled && !course.payment.required, status = enrolled ? saved?.percentage === 100 ? "completed" : "active" : null;
+    return { ...course, access: { assigned: Boolean(enrollment?.assignedBy), enrolled, videos, status }, ...(videos && saved ? { progress: { completedCount: saved.completedCount, totalLessons: saved.totalLessons, percentage: saved.percentage, resume: saved.resume } } : {}) };
   }) });
 });
 export const getCourse = asyncHandler(async (req, res) => {

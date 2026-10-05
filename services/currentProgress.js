@@ -7,7 +7,7 @@ export async function currentProgress(enrollments) {
   const courseIds = [...new Set(enrollments.map((entry) => String(entry.course._id || entry.course)))];
   const studentIds = [...new Set(enrollments.map((entry) => String(entry.student._id || entry.student)))];
   const [lessons, records] = await Promise.all([
-    Lesson.find({ course: { $in: courseIds } }).select("_id course").lean(),
+    Lesson.find({ course: { $in: courseIds } }).select("_id course contentType").populate("video", "status").lean(),
     Progress.find({ student: { $in: studentIds }, course: { $in: courseIds } }).lean(),
   ]);
   const lessonsByCourse = new Map(courseIds.map((id) => [id, new Set()]));
@@ -21,7 +21,8 @@ export async function currentProgress(enrollments) {
     const current = lessonsByCourse.get(course);
     const completedLessons = (record?.completedLessons || []).filter((id) => current.has(String(id)));
     const percentage = current.size ? Math.round(completedLessons.length / current.size * 100) : 0;
-    return [key, { ...record, completedLessons, percentage }];
+    const resumeLesson = record?.resume?.lesson && lessons.find((lesson) => String(lesson._id) === String(record.resume.lesson) && String(lesson.course) === course && (lesson.contentType === "text" || lesson.video?.status === "ready"));
+    return [key, { ...record, completedLessons, completedCount: completedLessons.length, totalLessons: current.size, percentage, resumeRevision: record?.resumeRevision || 0, resume: resumeLesson ? record.resume : null }];
   }));
 }
 export function withCurrentCompletion(entry, progress) {

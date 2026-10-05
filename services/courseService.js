@@ -9,6 +9,7 @@ import Progress from "../models/Progress.js";
 import CourseNote from "../models/CourseNote.js";
 import Assessment from "../models/Assessment.js";
 import AssessmentAttempt from "../models/AssessmentAttempt.js";
+import { PracticalTask, PracticalRecord, CourseQuestion } from "../models/LearningSupport.js";
 import VideoAsset from "../models/VideoAsset.js";
 import { r2Client } from "./videoObjectStore.js";
 
@@ -62,6 +63,9 @@ export async function purgeCourse(courseId) {
     CourseNote.deleteMany({ course: course._id }),
     Assessment.deleteMany({ course: course._id }),
     AssessmentAttempt.deleteMany({ course: course._id }),
+    PracticalTask.deleteMany({ course: course._id }),
+    PracticalRecord.deleteMany({ course: course._id }),
+    CourseQuestion.deleteMany({ course: course._id }),
     VideoAsset.deleteMany({ course: course._id }),
   ]);
   const removed = await Course.deleteOne({ _id: course._id });
