@@ -72,6 +72,23 @@ test("authored assessments and attempts preserve entitlement, keys, server timin
       for (const [method, suffix, payload] of [["GET", "", undefined], ["PUT", "/answers", { questionIndex: 0, optionIndex: 1 }], ["POST", "/submit", {}]]) assert.equal((await call(`/assessment-attempts/${attempt.id}${suffix}`, users.second, method, payload)).status, 404);
       assert.equal((await call(`/assessment-attempts/${attempt.id}`, users.teacher)).status, 403);
     });
+    await t.test("interrupted first saves and concurrent creation retries retain one mock without exposing request identifiers", async () => {
+      const otherCourse = await Course.create({ title: "Synthetic mock retry course", description: "Synthetic authoring only", category: category._id, instructor: users.teacher.id });
+      const path = `/courses/${otherCourse._id}/assessments`, requestId = crypto.randomUUID();
+      const draft = { title: "Synthetic retry mock", kind: "mock", durationMinutes: 30, status: "draft", module: null, questions: [], requestId };
+      const writes = await Promise.all(Array.from({ length: 4 }, () => call(path, users.teacher, "POST", draft)));
+      writes.forEach((r) => assert.equal(r.status, 201));
+      const ids = new Set(writes.map((r) => r.body.data.assessment.id)); assert.equal(ids.size, 1); assert.equal(await Assessment.countDocuments({ course: otherCourse._id }), 1);
+      const id = writes[0].body.data.assessment.id;
+      assert.equal((await call(path, users.teacher, "POST", draft)).body.data.assessment.id, id);
+      assert.equal((await call(path, users.other, "POST", draft)).status, 403);
+      assert.equal((await call(path, users.teacher, "POST", { ...draft, title: "Different content, same saved request" })).status, 409);
+      assert.equal((await call(path, users.teacher, "POST", { ...draft, requestId: "invalid" })).status, 400);
+      assert.equal((await call(`${path}/${id}`, users.admin, "PUT", { ...draft, questions, status: "published", version: 1 })).status, 200);
+      const retry = await call(path, users.teacher, "POST", draft); assert.equal(retry.body.data.assessment.version, 2); assert.equal(retry.body.data.assessment.status, "published");
+      for (const result of [...writes, retry, await call(path + "/manage", users.teacher)]) { const text = JSON.stringify(result.body); for (const secret of [requestId, "createToken", "createFingerprint"]) assert.ok(!text.includes(secret)); }
+      const { purgeCourse } = await import("../services/courseService.js"); await purgeCourse(otherCourse._id);
+    });
     await t.test("editing published content does not alter active snapshots; scoring ignores forged client values and submit is idempotent", async () => {
       const changed = await call(`${list}/${quiz.id}`, users.teacher, "PUT", { ...body, status: "draft", version: quiz.version, questions: [{ ...questions[0], correctIndex: 0 }] }); assert.equal(changed.status, 200); quiz = changed.body.data.assessment;
       const results = await Promise.all(Array.from({ length: 5 }, () => call(`/assessment-attempts/${attempt.id}/submit`, users.student, "POST", { answers: [1, 0], result: { correct: 2 }, deadline: "2099-01-01" })));

@@ -7,6 +7,7 @@ import Module from "../models/Module.js";
 import { requireCourseOwner } from "../services/courseService.js";
 import { requireCourseAccess } from "../services/courseAccess.js";
 import { ASSESSMENT_LIMITS, assessmentChanges, assessmentDTO, attemptDTO, finishAttempt } from "../services/assessments.js";
+import crypto from "node:crypto";
 
 export const manageAssessments = asyncHandler(async (req, res) => {
   await requireCourseOwner(req.params.courseId, req.user);
@@ -22,11 +23,24 @@ export const saveAssessment = asyncHandler(async (req, res) => {
     assessment = await Assessment.findOneAndUpdate({ _id: req.params.id, course: course._id, version: req.body.version }, { $set: changes, $inc: { version: 1 } }, { new: true, runValidators: true }).select("+questions");
     if (!assessment) throw new ApiError(409, "Assessment changed or is unavailable. Reload before saving.");
   } else {
+    let createToken, createFingerprint;
+    if (req.body.requestId !== undefined) {
+      if (typeof req.body.requestId !== "string" || !/^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i.test(req.body.requestId)) throw new ApiError(400, "Use a valid creation request identifier.");
+      createToken = crypto.createHash("sha256").update(req.body.requestId).digest("hex");
+      createFingerprint = crypto.createHash("sha256").update(JSON.stringify(changes)).digest("hex");
+    }
     for (let retry = 0; retry < 8; retry++) {
+      if (createToken) {
+        const saved = await Assessment.findOne({ course: course._id, createToken }).select("+questions +createFingerprint");
+        if (saved) {
+          if (saved.createFingerprint !== createFingerprint) throw new ApiError(409, "This creation request was already saved with different contents. Return to the test list, reload and edit the saved test.");
+          assessment = saved; break;
+        }
+      }
       const occupied = new Set((await Assessment.find({ course: course._id }).select("slot")).map((a) => a.slot));
       const slot = Array.from({ length: ASSESSMENT_LIMITS.assessments }, (_, i) => i).find((i) => !occupied.has(i));
       if (slot === undefined) throw new ApiError(409, "This course supports at most 40 assessments.");
-      try { assessment = await Assessment.create({ ...changes, course: course._id, slot }); break; }
+      try { assessment = await Assessment.create({ ...changes, course: course._id, slot, ...(createToken ? { createToken, createFingerprint } : {}) }); break; }
       catch (e) { if (e.code !== 11000) throw e; }
     }
     if (!assessment) throw new ApiError(409, "Another assessment was created concurrently. Retry safely.");

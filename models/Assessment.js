@@ -13,6 +13,11 @@ const schema = new mongoose.Schema({
   questionCount: { type: Number, default: 0 },
   slot: { type: Number, required: true, min: 0, max: 39, validate: Number.isInteger },
   questions: { type: [questionSchema], default: [], select: false },
+  createToken: { type: String, select: false, immutable: true },
+  createFingerprint: { type: String, select: false, immutable: true },
 }, { timestamps: true });
 schema.index({ course: 1, slot: 1 }, { unique: true });
+// Existing authored records need no migration. Only new retry-aware saves use
+// this identity; it is never exposed in owner/student DTOs.
+schema.index({ course: 1, createToken: 1 }, { unique: true, partialFilterExpression: { createToken: { $type: "string" } } });
 export default mongoose.model("Assessment", schema);
