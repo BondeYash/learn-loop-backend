@@ -4,6 +4,7 @@ import nodemailer from "nodemailer";
 import ApiError from "../utils/ApiError.js";
 import User from "../models/User.js";
 import bcrypt from "bcryptjs";
+import { BRAND_NAME } from "../config/brand.js";
 
 export const publicUser = (user) => ({
   id: user._id,
@@ -62,8 +63,8 @@ export const requestPasswordReset = async (email) => {
   await transporter.sendMail({
     from: process.env.EMAIL_FROM || smtpUser,
     to: user.email,
-    subject: "Reset your LMS password",
-    text: `Reset your password using this link: ${resetUrl}\nThis link expires in 10 minutes.`,
+    subject: `Reset your ${BRAND_NAME} password`,
+    text: `Reset your ${BRAND_NAME} password using this link: ${resetUrl}\nThis link expires in 10 minutes.`,
   });
   return null;
 };
