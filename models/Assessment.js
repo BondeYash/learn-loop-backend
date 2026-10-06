@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 export const questionSchema = new mongoose.Schema({
   prompt: String, options: [String], correctIndex: { type: Number, default: null }, explanation: String, topic: String,
+  importReview: { type: new mongoose.Schema({ source: String, flags: [String], checked: Boolean, confidence: Number }, { _id: false }), default: undefined },
 }, { _id: false });
 const schema = new mongoose.Schema({
   course: { type: mongoose.Schema.Types.ObjectId, ref: "Course", required: true, index: true },

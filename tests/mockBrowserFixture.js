@@ -12,6 +12,7 @@ import Lesson from "../models/Lesson.js";
 import Enrollment from "../models/Enrollment.js";
 import Assessment from "../models/Assessment.js";
 import AssessmentAttempt from "../models/AssessmentAttempt.js";
+import Session from "../models/Session.js";
 if (process.env.NODE_ENV !== "test" || process.env.CLIENT_URL !== "http://127.0.0.1:5186") throw new Error("This fixture requires the isolated local test environment.");
 const port = Number(process.env.TEST_MONGO_PORT || 27018);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Invalid local fixture port.");
@@ -40,6 +41,8 @@ for await (const line of input) {
     if (command.action === "expire" && mongoose.isValidObjectId(command.attemptId)) {
       const result = await AssessmentAttempt.updateOne({ _id: command.attemptId, course: course._id, status: "active" }, { $set: { deadline: new Date(Date.now() + 2500) } });
       console.log(JSON.stringify({ updated: result.modifiedCount }));
+    } else if (command.action === "expireOwnerSession") {
+      await Session.updateMany({ user: users.owner.id }, { $set: { expiresAt: new Date(Date.now() - 60000) } }); console.log(JSON.stringify({ expired: true }));
     } else if (command.action === "revoke") {
       await Enrollment.updateOne({ course: course._id, student: users.student.id }, { $unset: { assignedBy: 1 } }); console.log(JSON.stringify({ revoked: true }));
     } else if (command.action === "stats") {

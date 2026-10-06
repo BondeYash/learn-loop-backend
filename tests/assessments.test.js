@@ -57,6 +57,25 @@ test("authored assessments and attempts preserve entitlement, keys, server timin
       assert.equal(published.status, 200); quiz = published.body.data.assessment; assert.equal(quiz.questionCount, 2);
       assert.equal((await call(`${list}/${quiz.id}`, users.teacher, "PUT", { ...body, version: 1 })).status, 409);
     });
+    await t.test("import review survives drafts, gates publication and stays private to authors", async () => {
+      const review = { source: "PDF page 1 · question 1", flags: ["ocr", "low_confidence", "missing_explanation"], checked: false, confidence: 64 };
+      const imported = { ...body, title: "Synthetic local import", questions: [{ ...questions[0], explanation: "", importReview: review }] };
+      let made = await call(list, users.teacher, "POST", imported); assert.equal(made.status, 201);
+      let item = made.body.data.assessment; assert.deepEqual(item.questions[0].importReview, review);
+      assert.deepEqual((await call(list + "/manage", users.teacher)).body.data.assessments.find((a) => a.id === item.id).questions[0].importReview, review);
+      const valid = { ...imported, questions: [{ ...questions[0], importReview: review }] };
+      assert.equal((await call(`${list}/${item.id}`, users.other, "PUT", { ...valid, version: item.version })).status, 403);
+      const blocked = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...valid, status: "published", version: item.version }); assert.equal(blocked.status, 400); assert.match(blocked.body.message, /Review imported question/);
+      for (const patch of [{ flags: ["unknown"] }, { checked: "true" }, { confidence: 101 }, { confidence: "64" }, { source: "" }]) assert.equal((await call(list, users.teacher, "POST", { ...imported, questions: [{ ...questions[0], importReview: { ...review, ...patch } }] })).status, 400);
+      assert.equal((await call(list, users.teacher, "POST", { ...imported, status: "published", questions: [{ ...imported.questions[0], importReview: { ...review, checked: true } }] })).status, 400);
+      made = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...valid, status: "published", version: item.version, questions: [{ ...questions[0], importReview: { ...review, checked: true } }] }); assert.equal(made.status, 200); item = made.body.data.assessment;
+      const available = await call(list, users.student); assert.ok(!JSON.stringify(available).includes("importReview"));
+      const started = await call(`/assessments/${item.id}/attempts`, users.student, "POST", {}); assert.equal(started.status, 200); hidden(started); assert.ok(!JSON.stringify(started).includes("importReview"));
+      const updated = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...valid, version: item.version, questions: [{ ...questions[0], explanation: "New draft explanation", importReview: review }] }); assert.equal(updated.status, 200);
+      await call(`/assessment-attempts/${started.body.data.attempt.id}/answers`, users.student, "PUT", { questionIndex: 0, optionIndex: 1 });
+      const ended = await call(`/assessment-attempts/${started.body.data.attempt.id}/submit`, users.student, "POST", {}); assert.equal(ended.body.data.attempt.result.correct, 1); assert.equal(ended.body.data.attempt.review[0].explanation, questions[0].explanation); assert.ok(!JSON.stringify(ended).includes("importReview"));
+      await AssessmentAttempt.deleteMany({ assessment: item.id }); await Assessment.deleteOne({ _id: item.id });
+    });
     await t.test("student list/start/answer/read/history never leak keys, and concurrent starts resume one attempt", async () => {
       const available = await call(list, users.student); assert.equal(available.status, 200); hidden(available);
       const starts = await Promise.all(Array.from({ length: 6 }, () => call(`/assessments/${quiz.id}/attempts`, users.student, "POST", { score: 100, startedAt: "2099-01-01", answers: [1, 0] })));

@@ -33,7 +33,17 @@ export async function assessmentChanges(body, courseId) {
     if (correctIndex !== null && (!Number.isInteger(correctIndex) || correctIndex < 0 || correctIndex >= options.length)) invalid("The correct answer must be one of this question's options.");
     if (published && (!prompt || options.some((o) => !o) || correctIndex === null || !explanation)) invalid(`Complete question ${index + 1}, its options, correct answer and explanation before publishing.`);
     if (published && new Set(options.map((o) => o.toLocaleLowerCase())).size !== options.length) invalid("Published options must be distinct.");
-    return { prompt, options, correctIndex, explanation, topic };
+    let importReview;
+    if (q.importReview !== undefined) {
+      const r = q.importReview, allowed = new Set(["table", "pdf_text", "ocr", "low_confidence", "layout", "diagram", "separate_key", "missing_key", "missing_explanation", "manual"]);
+      if (!r || typeof r !== "object" || Array.isArray(r) || typeof r.checked !== "boolean" || !Array.isArray(r.flags) || r.flags.length < 1 || r.flags.length > 10 || r.flags.some((f) => !allowed.has(f))) invalid("Use valid imported-question review details.");
+      const source = text(r.source, 160, "Import source");
+      if (!source) invalid("An imported question needs its page or row reference.");
+      if (r.confidence !== undefined && (!Number.isFinite(r.confidence) || r.confidence < 0 || r.confidence > 100)) invalid("Use a valid OCR confidence.");
+      importReview = { source, flags: [...new Set(r.flags)], checked: r.checked, ...(r.confidence !== undefined ? { confidence: r.confidence } : {}) };
+      if (published && !importReview.checked) invalid(`Review imported question ${index + 1} and confirm its text, options, answer and explanation before publishing.`);
+    }
+    return { prompt, options, correctIndex, explanation, topic, ...(importReview ? { importReview } : {}) };
   });
   return { title, kind: body.kind, module, durationMinutes, status: body.status, questions, questionCount: questions.length };
 }
@@ -50,7 +60,7 @@ export function scoreAttempt(snapshot, answers) {
 }
 export function assessmentDTO(value, management = false) {
   return { id: String(value._id), courseId: String(value.course), moduleId: value.module ? String(value.module) : null, title: value.title, kind: value.kind, durationMinutes: value.durationMinutes, questionCount: value.questionCount, status: value.status, version: value.version,
-    ...(management ? { questions: value.questions.map((q) => ({ prompt: q.prompt, options: [...q.options], correctIndex: q.correctIndex, explanation: q.explanation, topic: q.topic })) } : {}) };
+    ...(management ? { questions: value.questions.map((q) => ({ prompt: q.prompt, options: [...q.options], correctIndex: q.correctIndex, explanation: q.explanation, topic: q.topic, ...(q.importReview ? { importReview: { source: q.importReview.source, flags: [...q.importReview.flags], checked: q.importReview.checked, ...(q.importReview.confidence !== undefined ? { confidence: q.importReview.confidence } : {}) } } : {}) })) } : {}) };
 }
 export function attemptDTO(value) {
   const s = value.snapshot;
