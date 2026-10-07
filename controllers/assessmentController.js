@@ -65,7 +65,7 @@ export const startAttempt = asyncHandler(async (req, res) => {
   const startedAt = new Date();
   try {
     active = await AssessmentAttempt.create({ student: req.user._id, course: assessment.course, assessment: assessment._id, attemptNumber: count + 1, startedAt, deadline: assessment.durationMinutes ? new Date(startedAt.getTime() + assessment.durationMinutes * 60000) : null,
-      snapshot: { title: assessment.title, kind: assessment.kind, version: assessment.version, durationMinutes: assessment.durationMinutes, questions: assessment.questions.map((q) => q.toObject()) }, answers: assessment.questions.map(() => null) });
+      snapshot: { title: assessment.title, kind: assessment.kind, version: assessment.version, durationMinutes: assessment.durationMinutes, feedbackMode: assessment.kind === "mock" ? "after_answer" : "after_submit", questions: assessment.questions.map((q) => q.toObject()) }, answers: assessment.questions.map(() => null) });
   } catch (error) {
     if (error.code !== 11000) throw error;
     active = await AssessmentAttempt.findOne({ student: req.user._id, assessment: assessment._id, status: "active" }).select("+snapshot");
@@ -85,8 +85,18 @@ export const answerAttempt = asyncHandler(async (req, res) => {
   if (attempt.status !== "active") throw new ApiError(409, "This attempt has ended. Open its result to review it.");
   const { questionIndex, optionIndex } = req.body, question = attempt.snapshot.questions[questionIndex];
   if (!Number.isInteger(questionIndex) || questionIndex < 0 || !question || optionIndex !== null && (!Number.isInteger(optionIndex) || optionIndex < 0 || optionIndex >= question.options.length)) throw new ApiError(400, "Choose an option belonging to this question, or null to clear it.");
-  const saved = await AssessmentAttempt.findOneAndUpdate({ _id: attempt._id, student: req.user._id, status: "active", $or: [{ deadline: null }, { $expr: { $gt: ["$deadline", "$$NOW"] } }] }, { $set: { [`answers.${questionIndex}`]: optionIndex }, $inc: { revision: 1 } }, { new: true }).select("+snapshot");
-  if (!saved) { await finishAttempt(await ownAttempt(req)); throw new ApiError(409, "This attempt has ended. Open its result to review it."); }
+  const immediate = attempt.snapshot.feedbackMode === "after_answer";
+  if (immediate && optionIndex === null) throw new ApiError(400, "Mock-test answers cannot be cleared. Your first saved choice is final.");
+  if (immediate && Number.isInteger(attempt.answers[questionIndex])) {
+    if (attempt.answers[questionIndex] !== optionIndex) throw new ApiError(409, "This question is already answered. Your first saved choice is final.");
+    return new ApiResponse(res, 200, "Answer already saved", { attempt: attemptDTO(attempt) });
+  }
+  const saved = await AssessmentAttempt.findOneAndUpdate({ _id: attempt._id, student: req.user._id, status: "active", ...(immediate ? { [`answers.${questionIndex}`]: null } : {}), $or: [{ deadline: null }, { $expr: { $gt: ["$deadline", "$$NOW"] } }] }, { $set: { [`answers.${questionIndex}`]: optionIndex }, $inc: { revision: 1 } }, { new: true }).select("+snapshot");
+  if (!saved) {
+    attempt = await finishAttempt(await ownAttempt(req));
+    if (immediate && attempt.status === "active" && attempt.answers[questionIndex] === optionIndex) return new ApiResponse(res, 200, "Answer already saved", { attempt: attemptDTO(attempt) });
+    throw new ApiError(409, attempt.status === "active" ? "This question is already answered. Your first saved choice is final." : "This attempt has ended. Open its result to review it.");
+  }
   return new ApiResponse(res, 200, "Answer saved", { attempt: attemptDTO(saved) });
 });
 export const submitAttempt = asyncHandler(async (req, res) => new ApiResponse(res, 200, "Attempt submitted", { attempt: attemptDTO(await finishAttempt(await ownAttempt(req), true)) }));

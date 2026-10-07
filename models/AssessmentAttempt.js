@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 import { questionSchema } from "./Assessment.js";
-const snapshot = new mongoose.Schema({ title: String, kind: String, version: Number, durationMinutes: Number, questions: [questionSchema] }, { _id: false });
+const snapshot = new mongoose.Schema({ title: String, kind: String, version: Number, durationMinutes: Number, feedbackMode: { type: String, enum: ["after_submit", "after_answer"], default: "after_submit" }, questions: [questionSchema] }, { _id: false });
 const schema = new mongoose.Schema({
   assessment: { type: mongoose.Schema.Types.ObjectId, ref: "Assessment", required: true },
   course: { type: mongoose.Schema.Types.ObjectId, ref: "Course", required: true, index: true },

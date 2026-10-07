@@ -59,15 +59,16 @@ export function scoreAttempt(snapshot, answers) {
   return { correct, total, answered, percentage: total ? Math.round(correct / total * 100) : 0, topics: [...topics.values()] };
 }
 export function assessmentDTO(value, management = false) {
-  return { id: String(value._id), courseId: String(value.course), moduleId: value.module ? String(value.module) : null, title: value.title, kind: value.kind, durationMinutes: value.durationMinutes, questionCount: value.questionCount, status: value.status, version: value.version,
+  return { id: String(value._id), courseId: String(value.course), moduleId: value.module ? String(value.module) : null, title: value.title, kind: value.kind, feedbackMode: value.kind === "mock" ? "after_answer" : "after_submit", durationMinutes: value.durationMinutes, questionCount: value.questionCount, status: value.status, version: value.version,
     ...(management ? { questions: value.questions.map((q) => ({ prompt: q.prompt, options: [...q.options], correctIndex: q.correctIndex, explanation: q.explanation, topic: q.topic, ...(q.importReview ? { importReview: { source: q.importReview.source, flags: [...q.importReview.flags], checked: q.importReview.checked, ...(q.importReview.confidence !== undefined ? { confidence: q.importReview.confidence } : {}) } } : {}) })) } : {}) };
 }
 export function attemptDTO(value) {
   const s = value.snapshot;
-  const submitted = value.status !== "active";
-  return { id: String(value._id), assessmentId: String(value.assessment), courseId: String(value.course), status: value.status, revision: value.revision, title: s.title, kind: s.kind, version: s.version,
+  const submitted = value.status !== "active", feedbackMode = s.feedbackMode ?? "after_submit";
+  return { id: String(value._id), assessmentId: String(value.assessment), courseId: String(value.course), status: value.status, revision: value.revision, title: s.title, kind: s.kind, version: s.version, feedbackMode,
     startedAt: value.startedAt, deadline: value.deadline, submittedAt: value.submittedAt, serverNow: new Date(), answers: [...value.answers],
     questions: s.questions.map((q) => ({ prompt: q.prompt, options: [...q.options], topic: q.topic })),
+    ...(!submitted && feedbackMode === "after_answer" ? { feedback: s.questions.map((q, i) => Number.isInteger(value.answers[i]) ? { correctIndex: q.correctIndex, selectedIndex: value.answers[i], correct: value.answers[i] === q.correctIndex } : null) } : {}),
     ...(submitted ? { result: value.result, review: s.questions.map((q, i) => ({ correctIndex: q.correctIndex, explanation: q.explanation, selectedIndex: value.answers[i] ?? null, correct: value.answers[i] === q.correctIndex })) } : {}) };
 }
 export async function finishAttempt(attempt, explicit = false) {

@@ -43,6 +43,8 @@ for await (const line of input) {
       console.log(JSON.stringify({ updated: result.modifiedCount }));
     } else if (command.action === "expireOwnerSession") {
       await Session.updateMany({ user: users.owner.id }, { $set: { expiresAt: new Date(Date.now() - 60000) } }); console.log(JSON.stringify({ expired: true }));
+    } else if (command.action === "expireStudentSession") {
+      await Session.updateMany({ user: users.student.id }, { $set: { expiresAt: new Date(Date.now() - 60000) } }); console.log(JSON.stringify({ expired: true }));
     } else if (command.action === "revoke") {
       await Enrollment.updateOne({ course: course._id, student: users.student.id }, { $unset: { assignedBy: 1 } }); console.log(JSON.stringify({ revoked: true }));
     } else if (command.action === "stats") {

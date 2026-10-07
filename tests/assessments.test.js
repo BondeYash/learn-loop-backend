@@ -51,6 +51,10 @@ test("authored assessments and attempts preserve entitlement, keys, server timin
       assert.equal((await call(list, users.student)).body.data.assessments.length, 0);
       assert.equal((await call(`/assessments/${quiz.id}/attempts`, users.student, "POST", {})).status, 404);
       for (const extra of [{ status: "published" }, { questions: Array(41).fill(questions[0]) }, { kind: "mock", durationMinutes: null }, { durationMinutes: 0 }, { module: new mongoose.Types.ObjectId().toString() }]) assert.equal((await call(list, users.teacher, "POST", { ...body, ...extra })).status, 400);
+      for (const role of ["teacher", "admin"]) for (const status of ["draft", "published"]) {
+        const rejected = await call(list, users[role], "POST", { ...body, status, questions: [{ ...questions[0], options: Array.from({ length: 7 }, (_, i) => `Option ${i}`), importReview: { source: "PDF page 1 · question 1", flags: ["layout"], checked: true } }] });
+        assert.equal(rejected.status, 400); assert.match(rejected.body.message, /2 to 6 options/);
+      }
       assert.equal((await call(list, users.teacher, "POST", { ...body, status: "published", questions: [{ ...questions[0], explanation: "" }] })).status, 400);
       assert.equal((await call(list, users.teacher, "POST", { ...body, status: "published", questions: [{ ...questions[0], options: ["Same", "same"] }] })).status, 400);
       const published = await call(`${list}/${quiz.id}`, users.admin, "PUT", { ...body, questions, status: "published", version: quiz.version });
@@ -86,6 +90,9 @@ test("authored assessments and attempts preserve entitlement, keys, server timin
       assert.equal((await AssessmentAttempt.findById(attempt.id)).snapshot, undefined);
       for (const answer of [{ questionIndex: -1, optionIndex: 0 }, { questionIndex: 2, optionIndex: 0 }, { questionIndex: 0, optionIndex: 9 }, { questionIndex: "0", optionIndex: 1 }, { questionIndex: 0 }]) assert.equal((await call(`/assessment-attempts/${attempt.id}/answers`, users.student, "PUT", answer)).status, 400);
       const saved = await call(`/assessment-attempts/${attempt.id}/answers`, users.student, "PUT", { questionIndex: 0, optionIndex: 0, correctIndex: 0, score: 100 }); assert.equal(saved.status, 200); hidden(saved);
+      const edit = await call(`/assessment-attempts/${attempt.id}/answers`, users.student, "PUT", { questionIndex: 0, optionIndex: 1 }); assert.equal(edit.status, 200); hidden(edit);
+      const clear = await call(`/assessment-attempts/${attempt.id}/answers`, users.student, "PUT", { questionIndex: 0, optionIndex: null }); assert.equal(clear.status, 200); hidden(clear); assert.deepEqual(clear.body.data.attempt.answers, [null, null]);
+      await call(`/assessment-attempts/${attempt.id}/answers`, users.student, "PUT", { questionIndex: 0, optionIndex: 0 });
       const read = await call(`/assessment-attempts/${attempt.id}`, users.student); hidden(read); assert.deepEqual(read.body.data.attempt.answers, [0, null]);
       hidden(await call(`/courses/${course._id}/assessment-attempts`, users.student));
       for (const [method, suffix, payload] of [["GET", "", undefined], ["PUT", "/answers", { questionIndex: 0, optionIndex: 1 }], ["POST", "/submit", {}]]) assert.equal((await call(`/assessment-attempts/${attempt.id}${suffix}`, users.second, method, payload)).status, 404);
@@ -133,14 +140,14 @@ test("authored assessments and attempts preserve entitlement, keys, server timin
       assert.equal(result.status, "timed_out"); assert.equal(result.result.percentage, 50); assert.deepEqual(result.answers, [1, null]);
       assert.equal((await call(`/assessment-attempts/${attempt.id}/submit`, users.student, "POST", {})).body.data.attempt.submittedAt, result.submittedAt);
     });
-    await t.test("answer/submit races preserve accepted answers in the scored result; clear answers and fresh attempts work", async () => {
+    await t.test("answer/submit races preserve accepted mock answers and their first choices remain locked", async () => {
       attempt = (await call(`/assessments/${mock.id}/attempts`, users.student, "POST", {})).body.data.attempt;
       await call(`/assessment-attempts/${attempt.id}/answers`, users.student, "PUT", { questionIndex: 0, optionIndex: 1 });
-      assert.deepEqual((await call(`/assessment-attempts/${attempt.id}/answers`, users.student, "PUT", { questionIndex: 0, optionIndex: null })).body.data.attempt.answers, [null, null]);
+      assert.equal((await call(`/assessment-attempts/${attempt.id}/answers`, users.student, "PUT", { questionIndex: 0, optionIndex: null })).status, 400);
       const [answer, submit] = await Promise.all([call(`/assessment-attempts/${attempt.id}/answers`, users.student, "PUT", { questionIndex: 1, optionIndex: 0 }), call(`/assessment-attempts/${attempt.id}/submit`, users.student, "POST", {})]);
       assert.equal(submit.status, 200); assert.ok([200, 409].includes(answer.status));
       const final = (await call(`/assessment-attempts/${attempt.id}`, users.student)).body.data.attempt;
-      assert.equal(final.result.correct, final.answers[1] === 0 ? 1 : 0);
+      assert.equal(final.result.correct, 1 + (final.answers[1] === 0 ? 1 : 0));
       if (answer.status === 200) assert.equal(final.answers[1], 0);
     });
     await t.test("database uniqueness enforces the course and learner limits under concurrent creation", async () => {
