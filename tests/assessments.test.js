@@ -55,7 +55,7 @@ test("authored assessments and attempts preserve entitlement, keys, server timin
         const rejected = await call(list, users[role], "POST", { ...body, status, questions: [{ ...questions[0], options: Array.from({ length: 7 }, (_, i) => `Option ${i}`), importReview: { source: "PDF page 1 · question 1", flags: ["layout"], checked: true } }] });
         assert.equal(rejected.status, 400); assert.match(rejected.body.message, /2 to 6 options/);
       }
-      assert.equal((await call(list, users.teacher, "POST", { ...body, status: "published", questions: [{ ...questions[0], explanation: "" }] })).status, 400);
+      assert.equal((await call(list, users.teacher, "POST", { ...body, status: "published", questions: [{ ...questions[0], prompt: "", explanation: "" }] })).status, 400);
       assert.equal((await call(list, users.teacher, "POST", { ...body, status: "published", questions: [{ ...questions[0], options: ["Same", "same"] }] })).status, 400);
       const published = await call(`${list}/${quiz.id}`, users.admin, "PUT", { ...body, questions, status: "published", version: quiz.version });
       assert.equal(published.status, 200); quiz = published.body.data.assessment; assert.equal(quiz.questionCount, 2);
@@ -67,18 +67,41 @@ test("authored assessments and attempts preserve entitlement, keys, server timin
       let made = await call(list, users.teacher, "POST", imported); assert.equal(made.status, 201);
       let item = made.body.data.assessment; assert.deepEqual(item.questions[0].importReview, review);
       assert.deepEqual((await call(list + "/manage", users.teacher)).body.data.assessments.find((a) => a.id === item.id).questions[0].importReview, review);
-      const valid = { ...imported, questions: [{ ...questions[0], importReview: review }] };
+      const valid = imported;
       assert.equal((await call(`${list}/${item.id}`, users.other, "PUT", { ...valid, version: item.version })).status, 403);
       const blocked = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...valid, status: "published", version: item.version }); assert.equal(blocked.status, 400); assert.match(blocked.body.message, /Review imported question/);
       for (const patch of [{ flags: ["unknown"] }, { checked: "true" }, { confidence: 101 }, { confidence: "64" }, { source: "" }]) assert.equal((await call(list, users.teacher, "POST", { ...imported, questions: [{ ...questions[0], importReview: { ...review, ...patch } }] })).status, 400);
-      assert.equal((await call(list, users.teacher, "POST", { ...imported, status: "published", questions: [{ ...imported.questions[0], importReview: { ...review, checked: true } }] })).status, 400);
-      made = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...valid, status: "published", version: item.version, questions: [{ ...questions[0], importReview: { ...review, checked: true } }] }); assert.equal(made.status, 200); item = made.body.data.assessment;
+      assert.equal((await call(list, users.teacher, "POST", { ...imported, status: "published", questions: [{ ...imported.questions[0], correctIndex: null, importReview: { ...review, checked: true } }] })).status, 400);
+      made = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...valid, status: "published", version: item.version, questions: [{ ...imported.questions[0], importReview: { ...review, checked: true } }] }); assert.equal(made.status, 200); item = made.body.data.assessment;
+      assert.equal(item.questions[0].explanation, "");
       const available = await call(list, users.student); assert.ok(!JSON.stringify(available).includes("importReview"));
       const started = await call(`/assessments/${item.id}/attempts`, users.student, "POST", {}); assert.equal(started.status, 200); hidden(started); assert.ok(!JSON.stringify(started).includes("importReview"));
       const updated = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...valid, version: item.version, questions: [{ ...questions[0], explanation: "New draft explanation", importReview: review }] }); assert.equal(updated.status, 200);
       await call(`/assessment-attempts/${started.body.data.attempt.id}/answers`, users.student, "PUT", { questionIndex: 0, optionIndex: 1 });
-      const ended = await call(`/assessment-attempts/${started.body.data.attempt.id}/submit`, users.student, "POST", {}); assert.equal(ended.body.data.attempt.result.correct, 1); assert.equal(ended.body.data.attempt.review[0].explanation, questions[0].explanation); assert.ok(!JSON.stringify(ended).includes("importReview"));
+      const ended = await call(`/assessment-attempts/${started.body.data.attempt.id}/submit`, users.student, "POST", {}); assert.equal(ended.body.data.attempt.result.correct, 1); assert.equal(ended.body.data.attempt.review[0].explanation, ""); assert.ok(!JSON.stringify(ended).includes("importReview"));
       await AssessmentAttempt.deleteMany({ assessment: item.id }); await Assessment.deleteOne({ _id: item.id });
+    });
+    await t.test("mock tests and quizzes publish without explanations while required content and optional text limits remain enforced", async () => {
+      for (const kind of ["mock", "quiz"]) {
+        const q = { ...questions[0] }; delete q.explanation;
+        const content = { ...body, kind, durationMinutes: kind === "mock" ? 30 : null, status: "published", questions: [q] };
+        const made = await call(list, users.teacher, "POST", content); assert.equal(made.status, 201);
+        let item = made.body.data.assessment; assert.equal(item.questions[0].explanation, "");
+        for (const explanation of ["", "   \n ", null, "Supplied optional explanation"]) {
+          const saved = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...content, version: item.version, questions: [{ ...q, explanation }] });
+          assert.equal(saved.status, 200); item = saved.body.data.assessment; assert.equal(item.questions[0].explanation, explanation?.trim() || "");
+        }
+        for (const patch of [{ prompt: " " }, { options: ["A", " "] }, { options: ["A", " a "] }, { correctIndex: null }, { correctIndex: 2 }, { explanation: 42 }, { explanation: "x".repeat(2001) }]) {
+          const rejected = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...content, version: item.version, questions: [{ ...q, ...patch }] }); assert.equal(rejected.status, 400);
+        }
+        const saved = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...content, version: item.version }); assert.equal(saved.status, 200); item = saved.body.data.assessment;
+        assert.equal((await call(list + "/manage", users.teacher)).body.data.assessments.find((a) => a.id === item.id).questions[0].explanation, "");
+        const started = await call(`/assessments/${item.id}/attempts`, users.student, "POST", {}); assert.equal(started.status, 200); hidden(started);
+        const id = started.body.data.attempt.id;
+        assert.equal((await call(`/assessment-attempts/${id}/answers`, users.student, "PUT", { questionIndex: 0, optionIndex: 1 })).status, 200);
+        const ended = await call(`/assessment-attempts/${id}/submit`, users.student, "POST", {}); assert.equal(ended.status, 200); assert.equal(ended.body.data.attempt.result.correct, 1); assert.equal(ended.body.data.attempt.review[0].explanation, "");
+        await AssessmentAttempt.deleteMany({ assessment: item.id }); await Assessment.deleteOne({ _id: item.id });
+      }
     });
     await t.test("student list/start/answer/read/history never leak keys, and concurrent starts resume one attempt", async () => {
       const available = await call(list, users.student); assert.equal(available.status, 200); hidden(available);

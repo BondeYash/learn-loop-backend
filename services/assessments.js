@@ -31,8 +31,8 @@ export async function assessmentChanges(body, courseId) {
     if (!Array.isArray(q.options) || q.options.length < 2 || q.options.length > ASSESSMENT_LIMITS.options) invalid("Each question needs 2 to 6 options.");
     const options = q.options.map((o) => text(o, 400, "Option")), correctIndex = q.correctIndex ?? null;
     if (correctIndex !== null && (!Number.isInteger(correctIndex) || correctIndex < 0 || correctIndex >= options.length)) invalid("The correct answer must be one of this question's options.");
-    if (published && (!prompt || options.some((o) => !o) || correctIndex === null || !explanation)) invalid(`Complete question ${index + 1}, its options, correct answer and explanation before publishing.`);
-    if (published && new Set(options.map((o) => o.toLocaleLowerCase())).size !== options.length) invalid("Published options must be distinct.");
+    if (published && (!prompt || options.some((o) => !o) || correctIndex === null)) invalid(`Complete question ${index + 1}, its options and correct answer before publishing.`);
+    if (published && new Set(options.map((o) => o.toLocaleLowerCase())).size !== options.length) invalid(`Question ${index + 1}: published options must be distinct.`);
     let importReview;
     if (q.importReview !== undefined) {
       const r = q.importReview, allowed = new Set(["table", "pdf_text", "ocr", "low_confidence", "layout", "diagram", "separate_key", "missing_key", "missing_explanation", "manual"]);
@@ -41,7 +41,7 @@ export async function assessmentChanges(body, courseId) {
       if (!source) invalid("An imported question needs its page or row reference.");
       if (r.confidence !== undefined && (!Number.isFinite(r.confidence) || r.confidence < 0 || r.confidence > 100)) invalid("Use a valid OCR confidence.");
       importReview = { source, flags: [...new Set(r.flags)], checked: r.checked, ...(r.confidence !== undefined ? { confidence: r.confidence } : {}) };
-      if (published && !importReview.checked) invalid(`Review imported question ${index + 1} and confirm its text, options, answer and explanation before publishing.`);
+      if (published && !importReview.checked) invalid(`Review imported question ${index + 1} and confirm its text, options and correct answer before publishing. Explanations are optional.`);
     }
     return { prompt, options, correctIndex, explanation, topic, ...(importReview ? { importReview } : {}) };
   });
