@@ -41,7 +41,6 @@ export async function assessmentChanges(body, courseId) {
       if (!source) invalid("An imported question needs its page or row reference.");
       if (r.confidence !== undefined && (!Number.isFinite(r.confidence) || r.confidence < 0 || r.confidence > 100)) invalid("Use a valid OCR confidence.");
       importReview = { source, flags: [...new Set(r.flags)], checked: r.checked, ...(r.confidence !== undefined ? { confidence: r.confidence } : {}) };
-      if (published && !importReview.checked) invalid(`Review imported question ${index + 1} and confirm its text, options and correct answer before publishing. Explanations are optional.`);
     }
     return { prompt, options, correctIndex, explanation, topic, ...(importReview ? { importReview } : {}) };
   });

@@ -61,7 +61,7 @@ test("authored assessments and attempts preserve entitlement, keys, server timin
       assert.equal(published.status, 200); quiz = published.body.data.assessment; assert.equal(quiz.questionCount, 2);
       assert.equal((await call(`${list}/${quiz.id}`, users.teacher, "PUT", { ...body, version: 1 })).status, 409);
     });
-    await t.test("import review survives drafts, gates publication and stays private to authors", async () => {
+    await t.test("complete imports publish without manual review while source details remain private to authors", async () => {
       const review = { source: "PDF page 1 · question 1", flags: ["ocr", "low_confidence", "missing_explanation"], checked: false, confidence: 64 };
       const imported = { ...body, title: "Synthetic local import", questions: [{ ...questions[0], explanation: "", importReview: review }] };
       let made = await call(list, users.teacher, "POST", imported); assert.equal(made.status, 201);
@@ -69,7 +69,7 @@ test("authored assessments and attempts preserve entitlement, keys, server timin
       assert.deepEqual((await call(list + "/manage", users.teacher)).body.data.assessments.find((a) => a.id === item.id).questions[0].importReview, review);
       const valid = imported;
       assert.equal((await call(`${list}/${item.id}`, users.other, "PUT", { ...valid, version: item.version })).status, 403);
-      const blocked = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...valid, status: "published", version: item.version }); assert.equal(blocked.status, 400); assert.match(blocked.body.message, /Review imported question/);
+      const published = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...valid, status: "published", version: item.version }); assert.equal(published.status, 200); item = published.body.data.assessment; assert.equal(item.questions[0].importReview.checked, false);
       for (const patch of [{ flags: ["unknown"] }, { checked: "true" }, { confidence: 101 }, { confidence: "64" }, { source: "" }]) assert.equal((await call(list, users.teacher, "POST", { ...imported, questions: [{ ...questions[0], importReview: { ...review, ...patch } }] })).status, 400);
       assert.equal((await call(list, users.teacher, "POST", { ...imported, status: "published", questions: [{ ...imported.questions[0], correctIndex: null, importReview: { ...review, checked: true } }] })).status, 400);
       made = await call(`${list}/${item.id}`, users.teacher, "PUT", { ...valid, status: "published", version: item.version, questions: [{ ...imported.questions[0], importReview: { ...review, checked: true } }] }); assert.equal(made.status, 200); item = made.body.data.assessment;
