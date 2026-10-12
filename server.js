@@ -13,20 +13,20 @@ import { PracticalTask, PracticalRecord, CourseQuestion } from "./models/Learnin
 import Progress from "./models/Progress.js";
 import { acquisitionModels } from "./models/Acquisition.js";
 import { paymentOrderModel } from "./models/PaymentOrder.js";
-import { stripeEventModel } from "./models/StripeEvent.js";
-import { validateStripeStartup } from "./services/stripeClient.js";
+import { razorpayEventModel } from "./models/RazorpayEvent.js";
+import { paymentMode } from "./services/paymentSettings.js";
 
 const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
-  validateStripeStartup();
+  paymentMode();
   await connectDB();
   await checkObjectStore();
   await CourseNote.init();
   await Promise.all([Assessment.init(), AssessmentAttempt.init()]);
   await Promise.all([PracticalTask.init(), PracticalRecord.init(), CourseQuestion.init(), Progress.init()]);
   await Promise.all(acquisitionModels.map((model) => model.init()));
-  await Promise.all([paymentOrderModel().init(), stripeEventModel().init()]);
+  await Promise.all([paymentOrderModel().init(), razorpayEventModel().init()]);
   await Category.updateOne({ slug: "general" }, { $setOnInsert: { name: "General", slug: "general" } }, { upsert: true });
   let stopWorker = () => {};
   if (process.env.ENABLE_LEGACY_VIDEO_WORKER === "true") {

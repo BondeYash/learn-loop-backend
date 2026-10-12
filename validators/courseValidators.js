@@ -2,7 +2,7 @@ import { body, param } from "express-validator";
 import { validate } from "./authValidators.js";
 import { rupeesToMinor } from "../services/coursePricing.js";
 import { safePublicUrl } from "../services/publicCatalog.js";
-const priceField = () => body("price").optional().custom((value) => { rupeesToMinor(value); return true; }).customSanitizer((value) => rupeesToMinor(value) / 100);
+const priceField = () => body("price").optional().custom((value) => { const amount = rupeesToMinor(value); if (amount > 0 && amount < 100) throw new Error("Paid Razorpay courses must cost at least INR 1.00."); return true; }).customSanitizer((value) => rupeesToMinor(value) / 100);
 
 const objectId = (field) => param(field).isMongoId().withMessage(`Invalid ${field}`);
 const publicFields = () => [body("visibility").optional().isIn(["private", "public"]), ...Object.entries({ examName: 120, summary: 500, audience: 1000, publicInstructorName: 120, publicInstructorBio: 2000 }).map(([field, max]) => body(field).optional().isString().bail().trim().isLength({ max })), body("supportEmail").optional().isString().bail().trim().custom((value) => value === "" || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 254).withMessage("Use a valid support email or leave it blank."), ...["supportUrl", "termsUrl", "privacyPolicyUrl", "refundPolicyUrl"].map((field) => body(field).optional().isString().bail().trim().custom((value) => value === "" || value.length <= 2000 && safePublicUrl(value)).withMessage("Public links must use HTTPS without a username or password.")), body("previewLesson").optional({ nullable: true }).isMongoId().withMessage("Choose a valid sample lesson.")];

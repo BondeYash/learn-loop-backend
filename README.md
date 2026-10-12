@@ -78,6 +78,8 @@ The automated suite has 134 passing tests, including private PDFs and readiness-
 
 Live evidence and limits: [local verification record](docs/verification.md).
 
+Razorpay checkout, live/test configuration and webhook setup: [payment integration](docs/razorpay-payments.md).
+
 Current public enrollment and payment-record behavior: [Stage 2 documentation](docs/public-enrollment.md).
 
 Current staged completion, verification scope and remaining launch gaps: [release evidence](docs/staged-release.md). Optional source measurement and interest collection remain off until owner configuration: [acquisition](docs/acquisition.md).

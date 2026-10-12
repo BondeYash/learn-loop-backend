@@ -1,277 +1,200 @@
 import crypto from "node:crypto";
 import mongoose from "mongoose";
-import { paymentOrderModel } from "../models/PaymentOrder.js";
-import { stripeEventModel } from "../models/StripeEvent.js";
 import User from "../models/User.js";
+import { paymentOrderModel } from "../models/PaymentOrder.js";
+import { razorpayEventModel } from "../models/RazorpayEvent.js";
 import ApiError from "../utils/ApiError.js";
-import { requireCheckoutEligibility, courseEnrollment } from "./courseAccess.js";
+import { courseEnrollment, requireCheckoutEligibility } from "./courseAccess.js";
 import { fulfillPublicPurchase } from "./publicEnrollment.js";
 import { ensureCourseReady } from "./courseReadiness.js";
 import { rupeesToMinor } from "./coursePricing.js";
-import { requireStripeSettings, trustedCheckoutUrl, checkoutOrigin, assertStripeEventMode } from "./stripeClient.js";
-import { stripeMode } from "./stripeMode.js";
-import { reportPaymentFailure, checkoutFailureMessage } from "./paymentDiagnostics.js";
+import { paymentMode } from "./paymentSettings.js";
+import { requireRazorpaySettings, validRazorpayId, validSignature } from "./razorpayClient.js";
 
-const SESSION_FIELDS = "+stripeSessionId +stripePaymentIntentId +checkoutUrl +checkoutContract +checkoutRecoveryPlan";
-const ref = (value) => typeof value === "string" ? value : value?.id;
-export const paymentEvents = new Set(["checkout.session.completed", "checkout.session.async_payment_succeeded", "checkout.session.async_payment_failed", "checkout.session.expired", "payment_intent.succeeded", "payment_intent.payment_failed", "payment_intent.canceled", "charge.refunded", "charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed"]);
-
-function checkoutRequest(order, origin) {
-  const metadata = { orderId: String(order._id), studentId: String(order.student), courseId: String(order.course) };
-  return { mode: "payment", client_reference_id: String(order._id), metadata, payment_intent_data: { metadata }, line_items: [{ quantity: 1, price_data: { currency: "inr", unit_amount: order.amountMinor, product_data: { name: order.title } } }], success_url: `${origin.origin}/payments/${order._id}?checkout=success`, cancel_url: `${origin.origin}/payments/${order._id}?checkout=canceled` };
-}
-function newCheckoutContract(order, origin) {
-  return { version: 2, createdAt: new Date().toISOString(), key: `lessonloop-${order.testMode ? "test" : "live"}-checkout-v2-${order._id}`, request: checkoutRequest(order, origin) };
-}
-function assertCheckoutContract(order, contract, origin) {
-  if (contract?.version !== 2 || contract.key !== `lessonloop-${order.testMode ? "test" : "live"}-checkout-v2-${order._id}` || JSON.stringify(contract.request) !== JSON.stringify(checkoutRequest(order, origin))) throw new ApiError(503, "This payment attempt's saved configuration needs review. No new checkout was opened.");
-}
-
-async function legacySession(order, stripe) {
-  const matches = [], started = Date.now(); let cursor;
-  try {
-    for (let page = 0; page < 5; page++) {
-      const result = await stripe.checkout.sessions.list({ limit: 100, created: { gte: Math.floor(order.createdAt.getTime() / 1000) - 120 }, ...(cursor ? { starting_after: cursor } : {}) });
-      if (Date.now() - started > 10000 || !Array.isArray(result.data) || typeof result.has_more !== "boolean") throw new ApiError(503, "Earlier checkout reconciliation is incomplete. Retry shortly.");
-      for (const session of result.data) if (session.metadata?.orderId === String(order._id) || session.client_reference_id === String(order._id)) { assertSession(order, session); matches.push(session); }
-      if (!result.has_more) {
-        if (matches.length > 1) throw new ApiError(409, "Multiple earlier checkout sessions need review. No replacement was opened.");
-        if (!matches.length) return null;
-        const session = await stripe.checkout.sessions.retrieve(matches[0].id); assertSession(order, session); return session;
-      }
-      const last = result.data.at(-1)?.id;
-      if (!last || last === cursor) throw new ApiError(503, "Earlier checkout reconciliation is incomplete. Retry shortly.");
-      cursor = last;
-    }
-    throw new ApiError(503, "Earlier checkout reconciliation exceeds the safe scan limit. No replacement was opened.");
-  } catch (error) {
-    if (error instanceof ApiError) throw error;
-    reportPaymentFailure(error, "checkout_reconcile", order.testMode ? "test" : "live");
-    throw new ApiError(503, "Earlier checkout status is unavailable. No replacement was opened.");
-  }
-}
-
-async function recoverLegacyCheckout(order, stripe, origin, PaymentOrder) {
-  let session = await legacySession(order, stripe);
-  if (session) return { order, session };
-  if (Date.now() - order.createdAt.getTime() >= 24 * 60 * 60 * 1000) throw new ApiError(409, "The earlier payment's retry window ended. Its outcome needs review; no replacement was opened.");
-  if (!order.checkoutRecoveryPlan) {
-    const request = checkoutRequest(order, origin), key = `lessonloop-${order.testMode ? "test" : "live"}-checkout-${order._id}`;
-    const plan = { current: { key, request }, original: { key, request: { ...request, payment_method_types: ["card"], expires_at: Math.floor(order.checkoutExpiresAt.getTime() / 1000) } }, replacement: newCheckoutContract(order, origin) };
-    // This compare-and-set is the only controlled addition of an immutable
-    // recovery snapshot to an older document. Concurrent callers load one plan.
-    await PaymentOrder.collection.updateOne({ _id: order._id, checkoutRecoveryPlan: { $exists: false } }, { $set: { checkoutRecoveryPlan: plan } });
-    order = await PaymentOrder.findById(order._id).select(SESSION_FIELDS);
-  }
-  if (order.checkoutContract) return { order };
-  let rejected;
-  for (const [index, candidate] of [order.checkoutRecoveryPlan.current, order.checkoutRecoveryPlan.original].entries()) {
-    try { session = await stripe.checkout.sessions.create(structuredClone(candidate.request), { idempotencyKey: candidate.key }); return { order, session }; }
-    catch (error) {
-      reportPaymentFailure(error, "checkout_create", order.testMode ? "test" : "live");
-      if (error.type === "StripeInvalidRequestError" && error.statusCode === 400 && error.headers?.["idempotent-replayed"] === "true" && !error.payment_intent) { rejected = true; break; }
-      if (index === 0 && error.type === "StripeIdempotencyError") continue;
-      throw new ApiError(502, checkoutFailureMessage(error));
-    }
-  }
-  if (!rejected) throw new ApiError(409, "Earlier payment outcome is uncertain. No replacement was opened.");
-  session = await legacySession(order, stripe);
-  if (session) return { order, session };
-  // Only a replayed, definitive 400 plus a complete empty provider scan permits
-  // a new operation version. Never rotate on timeouts, 5xx or unknown outcomes.
-  await PaymentOrder.collection.updateOne({ _id: order._id, checkoutContract: { $exists: false }, stripeSessionId: { $exists: false }, active: true, status: { $in: ["pending", "failed"] } }, { $set: { checkoutContract: order.checkoutRecoveryPlan.replacement } });
-  order = await PaymentOrder.findById(order._id).select(SESSION_FIELDS);
-  if (!order.checkoutContract) throw new ApiError(409, "The earlier payment changed. Review its status before retrying.");
-  return { order };
-}
-
+export const ORDER_FIELDS = "+razorpayOrderId +razorpayPaymentId +checkoutContract +creationToken";
+export const paymentEvents = new Set(["payment.captured", "order.paid", "payment.failed", "refund.processed"]);
+const providerOf = (order) => order.provider === "razorpay" ? "razorpay" : "legacy";
 export function publicOrder(order) {
-  return { id: String(order._id), courseId: String(order.course), title: order.title, amountMinor: order.amountMinor, currency: "inr", status: order.status, testMode: order.testMode, refundedMinor: order.refundedMinor, paidAt: order.paidAt, checkoutExpiresAt: order.checkoutExpiresAt, createdAt: order.createdAt, enrollmentType: order.publicEnrollmentRequestedAt ? "public" : order.enrollmentType || "assigned" };
+  return { id: String(order._id), courseId: String(order.course), title: order.title, provider: providerOf(order), amountMinor: order.amountMinor, currency: "inr", status: order.status, testMode: order.testMode, refundedMinor: order.refundedMinor, paidAt: order.paidAt, checkoutExpiresAt: order.checkoutExpiresAt, createdAt: order.createdAt, enrollmentType: order.publicEnrollmentRequestedAt ? "public" : order.enrollmentType || "assigned" };
 }
 export async function quoteCourse(courseId, user) {
   const course = await requireCheckoutEligibility(courseId, user);
-  const mode = stripeMode(), testMode = mode === "test", enrollment = await courseEnrollment(course, user);
-  const enrollmentFields = { enrolled: Boolean(enrollment), enrollmentRequired: !enrollment, enrollmentType: course.visibility === "public" ? "public" : "assigned" };
-  // A course explicitly made free never inherits an older pending paid quote.
-  // Historical orders remain intact and can still be reconciled independently.
-  if (!course.price) return { courseId: String(course._id), title: course.title, amountMinor: 0, currency: "inr", testMode, paid: false, requiresPayment: false, ...enrollmentFields };
-  const PaymentOrder = paymentOrderModel(mode);
-  const existing = await PaymentOrder.findOne({ student: user._id, course: course._id, status: "paid", testMode });
-  // Keep an expired-but-unreconciled attempt reachable so its owner can check
-  // canonical Stripe status before opening a replacement checkout.
-  const pending = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode });
-  return { courseId: String(course._id), title: course.title, amountMinor: pending?.amountMinor ?? rupeesToMinor(course.price), currentAmountMinor: rupeesToMinor(course.price), currency: "inr", testMode, paid: Boolean(existing), requiresPayment: course.price > 0 && !existing, ...enrollmentFields, ...(pending ? { pendingOrderId: String(pending._id) } : {}) };
+  const mode = paymentMode(), testMode = mode === "test", PaymentOrder = paymentOrderModel(mode);
+  const [enrollment, paid, pending] = await Promise.all([
+    courseEnrollment(course, user),
+    PaymentOrder.exists({ student: user._id, course: course._id, status: "paid", testMode }),
+    PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode }),
+  ]);
+  return { courseId: String(course._id), title: course.title, provider: "razorpay", amountMinor: course.price ? pending?.amountMinor ?? rupeesToMinor(course.price) : 0, currentAmountMinor: rupeesToMinor(course.price), currency: "inr", testMode, paid: Boolean(paid), requiresPayment: course.price > 0 && !paid, enrolled: Boolean(enrollment), enrollmentRequired: !enrollment, enrollmentType: course.visibility === "public" ? "public" : "assigned", ...(course.price && pending ? { pendingOrderId: String(pending._id) } : {}) };
 }
-
-export async function startCheckout(courseId, user, requestKey, quotedAmountMinor, stripe) {
-  const { mode, testMode } = requireStripeSettings(), PaymentOrder = paymentOrderModel(mode);
-  const origin = checkoutOrigin();
-  if (typeof requestKey !== "string" || !/^[A-Za-z0-9_-]{16,80}$/.test(requestKey)) throw new ApiError(400, "Send a stable Idempotency-Key (16–80 letters, digits, underscores or hyphens) when retrying checkout.");
+function orderRequest(order) {
+  return { amount: order.amountMinor, currency: "INR", receipt: `ll_${order.testMode ? "test" : "live"}_${order._id}`, partial_payment: false, notes: { orderId: String(order._id), courseId: String(order.course), studentId: String(order.student), mode: order.testMode ? "test" : "live" } };
+}
+function assertOrder(order, remote) {
+  const expected = orderRequest(order);
+  if (!validRazorpayId(remote?.id, "order") || remote.entity !== "order" || remote.amount !== expected.amount || remote.currency !== "INR" || remote.receipt !== expected.receipt || !["created", "attempted", "paid"].includes(remote.status) || (order.razorpayOrderId && remote.id !== order.razorpayOrderId) || Object.entries(expected.notes).some(([key, value]) => remote.notes?.[key] !== value)) throw new ApiError(409, "Razorpay order details do not match this course purchase.");
+  if (!Number.isSafeInteger(remote.amount_paid) || !Number.isSafeInteger(remote.amount_due) || remote.amount_paid < 0 || remote.amount_due < 0 || remote.amount_paid + remote.amount_due !== order.amountMinor) throw new ApiError(409, "Razorpay order amounts do not match this purchase.");
+}
+function collection(data) {
+  if (data?.entity !== "collection" || !Array.isArray(data.items) || data.items.length > 100 || data.count !== data.items.length) throw new ApiError(503, "Razorpay payment details are incomplete. Retry shortly.");
+  return data.items;
+}
+async function attachOrder(order, remote) {
+  assertOrder(order, remote);
+  const saved = await paymentOrderModel(order.testMode ? "test" : "live").findOneAndUpdate({ _id: order._id, provider: "razorpay", $or: [{ razorpayOrderId: { $exists: false } }, { razorpayOrderId: remote.id }] }, { $set: { razorpayOrderId: remote.id } }, { new: true }).select(ORDER_FIELDS);
+  if (!saved) throw new ApiError(409, "The payment attempt changed. Refresh its status.");
+  return saved;
+}
+async function recoverCreatedOrder(order, client) {
+  if (order.checkoutContract?.keyId !== process.env.RAZORPAY_KEY_ID) throw new ApiError(409, "This unfinished payment uses earlier credentials and needs administrator review.");
+  const matches = [], started = Date.now();
+  for (let page = 0; page < 5; page++) {
+    if (Date.now() - started > 10000) throw new ApiError(503, "Payment recovery is taking longer than expected. Retry shortly.");
+    const items = collection(await client.fetchOrders({ receipt: orderRequest(order).receipt, count: 100, skip: page * 100 }));
+    for (const remote of items) if (remote.receipt === orderRequest(order).receipt) matches.push(remote);
+    if (matches.length > 1) throw new ApiError(409, "Multiple payment orders need administrator review. No new checkout was created.");
+    if (items.length < 100) return matches.length ? attachOrder(order, matches[0]) : null;
+  }
+  throw new ApiError(503, "Payment recovery exceeds the safe scan limit. No new checkout was created.");
+}
+async function ensureProviderOrder(order, client) {
+  if (order.razorpayOrderId) return order;
+  const Model = paymentOrderModel(order.testMode ? "test" : "live"), token = crypto.randomUUID();
+  const claimed = await Model.findOneAndUpdate({ _id: order._id, provider: "razorpay", razorpayOrderId: { $exists: false }, $or: [{ creationLeaseUntil: { $exists: false } }, { creationLeaseUntil: { $lt: new Date() } }] }, { $set: { creationToken: token, creationLeaseUntil: new Date(Date.now() + 30000) } }, { new: true }).select(ORDER_FIELDS);
+  if (!claimed) {
+    const saved = await Model.findById(order._id).select(ORDER_FIELDS);
+    if (saved?.razorpayOrderId) return saved;
+    throw new ApiError(503, "Checkout is being prepared. Retry the same payment attempt shortly.");
+  }
+  try {
+    if (claimed.creationStartedAt) {
+      const recovered = await recoverCreatedOrder(claimed, client);
+      if (!recovered) throw new ApiError(503, "The earlier checkout outcome is not confirmed yet. Retry this same attempt; no replacement order was created.");
+      return recovered;
+    }
+    if (claimed.checkoutContract?.version !== 1 || claimed.checkoutContract.keyId !== process.env.RAZORPAY_KEY_ID || JSON.stringify(claimed.checkoutContract.request) !== JSON.stringify(orderRequest(claimed))) throw new ApiError(409, "The saved checkout configuration needs administrator review.");
+    // Persist before the provider call. An interrupted response is recovered by
+    // its exact receipt; an uncertain POST is never repeated automatically.
+    await Model.updateOne({ _id: claimed._id, creationToken: token }, { $set: { creationStartedAt: new Date() } });
+    let remote;
+    try { remote = await client.createOrder(structuredClone(claimed.checkoutContract.request)); }
+    catch (error) {
+      if (error.providerRejected) await Model.updateOne({ _id: claimed._id, creationToken: token }, { $set: { status: "failed", active: false } });
+      throw error;
+    }
+    return await attachOrder(claimed, remote);
+  } finally {
+    await Model.updateOne({ _id: claimed._id, creationToken: token }, { $unset: { creationToken: 1, creationLeaseUntil: 1 } });
+  }
+}
+export async function startCheckout(courseId, user, requestKey, quotedAmountMinor, client) {
+  const { mode, testMode } = requireRazorpaySettings(), Model = paymentOrderModel(mode);
+  if (typeof requestKey !== "string" || !/^[A-Za-z0-9_-]{16,80}$/.test(requestKey)) throw new ApiError(400, "Use a stable payment request identifier when retrying checkout.");
   const course = await requireCheckoutEligibility(courseId, user);
   await ensureCourseReady(course._id);
   const amountMinor = rupeesToMinor(course.price);
-  if (!amountMinor) throw new ApiError(409, "This course is free; no payment is needed.");
-  if (await PaymentOrder.exists({ student: user._id, course: course._id, status: "paid", testMode })) throw new ApiError(409, "This course is already paid for.");
-  // Keep the established test hash stable so pre-release retries still work.
-  const hash = crypto.createHash("sha256").update(`${testMode ? "" : "live:"}${user._id}:${requestKey}`).digest("hex");
-  let order = await PaymentOrder.findOne({ student: user._id, requestKey: hash, testMode }).select(SESSION_FIELDS);
-  if (order && String(order.course) !== String(course._id)) throw new ApiError(409, "This checkout key belongs to another course.");
-  if (!order) order = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode }).select(SESSION_FIELDS);
+  if (amountMinor < 100) throw new ApiError(400, "A paid Razorpay course must cost at least INR 1.00. Free courses use free enrollment.");
+  if (await Model.exists({ student: user._id, course: course._id, status: "paid", testMode })) throw new ApiError(409, "This course is already paid for. Refresh to open it.");
+  const hash = crypto.createHash("sha256").update(`razorpay:${mode}:${user._id}:${requestKey}`).digest("hex");
+  let order = await Model.findOne({ student: user._id, requestKey: hash, testMode }).select(ORDER_FIELDS);
+  if (order && String(order.course) !== String(course._id)) throw new ApiError(409, "This payment request belongs to another course.");
+  if (!order) order = await Model.findOne({ student: user._id, course: course._id, active: true, testMode }).select(ORDER_FIELDS);
   if (!order) {
-    if (quotedAmountMinor !== amountMinor) throw new ApiError(409, "The course price changed. Refresh the price before paying.");
-    try {
-      const initial = { _id: new mongoose.Types.ObjectId(), student: user._id, course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", testMode, enrollmentType: course.visibility === "public" ? "public" : "assigned", checkoutExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) };
-      initial.checkoutContract = newCheckoutContract(initial, origin);
-      order = await PaymentOrder.findOneAndUpdate({ student: user._id, requestKey: hash, testMode }, { $setOnInsert: initial }, { upsert: true, new: true, runValidators: true }).select(SESSION_FIELDS);
-    } catch (error) {
+    if (quotedAmountMinor !== amountMinor) throw new ApiError(409, "The course price changed. Refresh before paying.");
+    const initial = { _id: new mongoose.Types.ObjectId(), provider: "razorpay", student: user._id, course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", testMode, enrollmentType: course.visibility === "public" ? "public" : "assigned" };
+    initial.checkoutContract = { version: 1, keyId: process.env.RAZORPAY_KEY_ID, request: orderRequest(initial) };
+    try { order = await Model.findOneAndUpdate({ student: user._id, requestKey: hash, testMode }, { $setOnInsert: initial }, { upsert: true, new: true, runValidators: true }).select(ORDER_FIELDS); }
+    catch (error) {
       if (error.code !== 11000) throw error;
-      order = await PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode }).select(SESSION_FIELDS);
+      order = await Model.findOne({ student: user._id, course: course._id, active: true, testMode }).select(ORDER_FIELDS);
     }
   }
-  if (!order || String(order.course) !== String(course._id)) throw new ApiError(409, "This checkout attempt belongs to another course.");
-  if (quotedAmountMinor !== order.amountMinor) throw new ApiError(409, "An existing checkout uses an earlier course price. Refresh its payment status before continuing.");
-  if (order.stripeSessionId && order.checkoutExpiresAt < new Date()) throw new ApiError(409, "This checkout attempt expired. Start a new attempt.");
-  if (["paid", "refunded", "partially_refunded", "disputed", "reversed"].includes(order.status)) throw new ApiError(409, "This payment has finished or needs review. Refresh its status before starting another.");
-  if (course.visibility === "public" && !order.publicEnrollmentRequestedAt) {
-    // Deliberate public checkout can adopt an earlier owned attempt without
-    // changing its immutable Stripe request or opening another operation.
-    order = await PaymentOrder.findOneAndUpdate({ _id: order._id, student: user._id }, { $set: { publicEnrollmentRequestedAt: new Date() } }, { new: true }).select(SESSION_FIELDS);
-  }
-  if (order.checkoutUrl) return { order: publicOrder(order), url: order.checkoutUrl };
-  let session;
-  if (!order.checkoutContract) {
-    const recovered = await recoverLegacyCheckout(order, stripe, origin, PaymentOrder);
-    order = recovered.order; session = recovered.session;
-  }
-  if (!session) {
-    assertCheckoutContract(order, order.checkoutContract, origin);
-    const contractCreated = Date.parse(order.checkoutContract.createdAt);
-    if (!Number.isFinite(contractCreated) || contractCreated > Date.now()) throw new ApiError(503, "This saved payment attempt needs configuration review.");
-    if (Date.now() - contractCreated >= 24 * 60 * 60 * 1000) {
-      // Stripe may prune keys after 24 hours. Never recreate an uncertain old
-      // operation merely because its original key can now be accepted again.
-      session = await legacySession(order, stripe);
-      if (!session) throw new ApiError(409, "The earlier payment's retry window ended. Its outcome needs review; no new checkout was opened.");
-    } else {
-      try { session = await stripe.checkout.sessions.create(structuredClone(order.checkoutContract.request), { idempotencyKey: order.checkoutContract.key }); }
-      catch (error) {
-        reportPaymentFailure(error, "checkout_create", mode);
-        throw new ApiError(502, checkoutFailureMessage(error));
-      }
-    }
-  }
-  assertSession(order, session);
-  if (session.status !== "open" || session.payment_status !== "unpaid") {
-    const existing = await reconcileOrder(order._id, session.id, stripe);
-    throw new ApiError(409, existing.status === "paid" ? "The earlier payment is verified. Refresh the course to open it." : "An earlier payment needs status review. No new checkout was opened.");
-  }
-  if (session.livemode !== !testMode || !trustedCheckoutUrl(session.url) || !session.id?.startsWith(`cs_${mode}_`) || !Number.isSafeInteger(session.expires_at) || session.expires_at <= Math.floor(Date.now() / 1000)) throw new ApiError(502, "Stripe did not return a valid checkout session for this mode.");
-  const saved = await PaymentOrder.findOneAndUpdate({ _id: order._id, $or: [{ stripeSessionId: { $exists: false } }, { stripeSessionId: session.id }] }, { $set: { stripeSessionId: session.id, checkoutUrl: session.url, checkoutExpiresAt: new Date(session.expires_at * 1000) } }, { new: true }).select(SESSION_FIELDS);
-  if (!saved) throw new ApiError(409, "The payment attempt changed. Refresh before paying.");
-  try {
-    const current = await requireCheckoutEligibility(course._id, user);
-    if (!current.price || !await User.exists({ _id: user._id, status: "active", mustChangePassword: false, authVersion: user.authVersion || 0 })) throw new ApiError(409, "Course or account access changed while opening checkout.");
-  } catch (error) {
-    // If access changes while Stripe is opening the page, retire an unpaid
-    // session before returning a redirect. A completed charge remains recorded.
-    try {
-      const expired = await stripe.checkout.sessions.expire(session.id);
-      if (expired.livemode === !testMode && expired.status === "expired") await PaymentOrder.updateOne({ _id: order._id, status: { $in: ["pending", "failed"] } }, { $set: { status: "expired", active: false } });
-    } catch { /* Preserve the order for signed webhook/reconciliation recovery. */ }
-    throw error;
-  }
-  return { order: publicOrder(saved), url: session.url };
+  if (!order || providerOf(order) !== "razorpay") throw new ApiError(409, "An earlier payment record needs administrator review before a new checkout can open.");
+  if (String(order.course) !== String(course._id) || quotedAmountMinor !== order.amountMinor) throw new ApiError(409, "An earlier payment uses different course details. Review its status before paying.");
+  if (order.status !== "pending") throw new ApiError(409, "This payment attempt finished. Refresh the status before starting another attempt.");
+  if (course.visibility === "public" && !order.publicEnrollmentRequestedAt) order = await Model.findByIdAndUpdate(order._id, { $set: { publicEnrollmentRequestedAt: new Date() } }, { new: true }).select(ORDER_FIELDS);
+  order = await ensureProviderOrder(order, client);
+  order = await reconcileOrder(order._id, client);
+  if (order.status !== "pending") throw new ApiError(409, "This payment attempt finished. Refresh to see its current status.");
+  await requireCheckoutEligibility(course._id, user);
+  if (!await User.exists({ _id: user._id, status: "active", mustChangePassword: false, authVersion: user.authVersion || 0 })) throw new ApiError(409, "Your account changed while opening checkout. Sign in again.");
+  return { order: publicOrder(order), checkout: { provider: "razorpay", keyId: process.env.RAZORPAY_KEY_ID, orderId: order.razorpayOrderId, amount: order.amountMinor, currency: "INR", name: "Praneet Vidyapeeth", description: order.title, prefill: { name: user.name, email: user.email } } };
 }
-
-function assertSession(order, session) {
-  const metadata = session.metadata || {};
-  const mode = order.testMode ? "test" : "live";
-  if (session.livemode !== !order.testMode || !session.id?.startsWith(`cs_${mode}_`) || session.mode !== "payment" || session.currency !== "inr" || session.amount_total !== order.amountMinor || session.client_reference_id !== String(order._id) || metadata.orderId !== String(order._id) || metadata.studentId !== String(order.student) || metadata.courseId !== String(order.course) || (order.stripeSessionId && order.stripeSessionId !== session.id)) throw new ApiError(409, "Stripe payment details do not match this order.");
-}
-export async function reconcileOrder(orderId, sessionId, stripe, eventCreated) {
-  const { mode, testMode } = requireStripeSettings(), PaymentOrder = paymentOrderModel(mode);
-  const token = crypto.randomUUID(), now = new Date();
-  const order = await PaymentOrder.findOneAndUpdate({ _id: orderId, testMode, $or: [{ reconciliationLeaseUntil: { $exists: false } }, { reconciliationLeaseUntil: { $lt: now } }] }, { $set: { reconciliationToken: token, reconciliationLeaseUntil: new Date(Date.now() + 90000) } }, { new: true }).select(SESSION_FIELDS);
+export async function reconcileOrder(orderId, client) {
+  const { mode, testMode } = requireRazorpaySettings(), Model = paymentOrderModel(mode), token = crypto.randomUUID();
+  let order = await Model.findOneAndUpdate({ _id: orderId, provider: "razorpay", testMode, $or: [{ reconciliationLeaseUntil: { $exists: false } }, { reconciliationLeaseUntil: { $lt: new Date() } }] }, { $set: { reconciliationToken: token, reconciliationLeaseUntil: new Date(Date.now() + 15000) } }, { new: true }).select(ORDER_FIELDS);
   if (!order) throw new ApiError(503, "Payment status is being checked. Retry shortly.");
   try {
-    const session = await stripe.checkout.sessions.retrieve(sessionId || order.stripeSessionId);
-    assertSession(order, session);
-    let status = session.status === "expired" ? "expired" : "pending", refundedMinor = 0, paymentIntentId = ref(session.payment_intent);
-    if (paymentIntentId) {
-      const intent = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ["latest_charge"] });
-      const meta = intent.metadata || {};
-      if (intent.livemode !== !testMode || intent.id !== paymentIntentId || (order.stripePaymentIntentId && order.stripePaymentIntentId !== intent.id) || intent.amount !== order.amountMinor || intent.currency !== "inr" || meta.orderId !== String(order._id) || meta.studentId !== String(order.student) || meta.courseId !== String(order.course)) throw new ApiError(409, "Stripe payment intent does not match this order.");
-      const charge = intent.latest_charge;
-      if (charge && (typeof charge !== "object" || charge.livemode !== !testMode || charge.amount !== order.amountMinor || charge.currency !== "inr" || ref(charge.payment_intent) !== intent.id)) throw new ApiError(409, "Stripe charge does not match this order.");
-      if (session.payment_status === "paid" && intent.status === "succeeded" && charge?.paid === true && charge.status === "succeeded") status = "paid";
-      else if (intent.status === "canceled" || intent.last_payment_error) status = "failed";
-      refundedMinor = Number(charge?.amount_refunded || 0);
-      if (!Number.isSafeInteger(refundedMinor) || refundedMinor < 0 || refundedMinor > order.amountMinor) throw new ApiError(409, "Stripe refund amount does not match this order.");
-      if (refundedMinor > 0) status = refundedMinor >= order.amountMinor ? "refunded" : "partially_refunded";
-      if (charge?.disputed) {
-        const disputes = await stripe.disputes.list({ charge: charge.id, limit: 10 });
-        if (!disputes.data?.length) throw new ApiError(503, "Stripe dispute details are not available yet.");
-        if (disputes.data.some((dispute) => dispute.livemode !== !testMode || ref(dispute.charge) !== charge.id || ref(dispute.payment_intent) !== intent.id)) throw new ApiError(409, "Stripe dispute does not match this order.");
-        if (disputes.data.some((dispute) => dispute.status === "lost")) status = "reversed";
-        else if (disputes.data.some((dispute) => dispute.status !== "won")) status = "disputed";
-      }
+    if (!order.razorpayOrderId) {
+      order = await ensureProviderOrder(order, client);
     }
-    const update = { status, active: ["pending", "failed"].includes(status), refundedMinor, stripeSessionId: session.id, ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}), ...(status === "paid" && !order.paidAt ? { paidAt: new Date() } : {}), ...(eventCreated ? { lastStripeEventAt: new Date(eventCreated * 1000) } : {}) };
-    const saved = await PaymentOrder.findOneAndUpdate({ _id: order._id, reconciliationToken: token }, { $set: update }, { new: true });
+    const [remote, response] = await Promise.all([client.fetchOrder(order.razorpayOrderId), client.fetchOrderPayments(order.razorpayOrderId)]);
+    assertOrder(order, remote);
+    const payments = collection(response);
+    for (const payment of payments) {
+      if (!validRazorpayId(payment.id, "pay") || payment.entity !== "payment" || payment.order_id !== remote.id || payment.amount !== order.amountMinor || payment.currency !== "INR" || !["created", "authorized", "captured", "failed", "refunded"].includes(payment.status)) throw new ApiError(409, "Razorpay payment details do not match this course purchase.");
+    }
+    const captured = payments.filter((p) => ["captured", "refunded"].includes(p.status) && p.captured === true);
+    if (captured.length > 1) throw new ApiError(409, "Multiple captured payments need administrator review.");
+    let status = payments.length && payments.every((p) => p.status === "failed") ? "failed" : "pending", refundedMinor = 0;
+    const payment = captured[0];
+    if (payment) {
+      if (remote.status !== "paid" || remote.amount_paid !== order.amountMinor || remote.amount_due !== 0) throw new ApiError(503, "Payment capture is awaiting confirmation. Retry shortly.");
+      refundedMinor = payment.amount_refunded ?? 0;
+      if (!Number.isSafeInteger(refundedMinor) || refundedMinor < 0 || refundedMinor > order.amountMinor) throw new ApiError(409, "Razorpay refund amount does not match this purchase.");
+      status = refundedMinor === order.amountMinor ? "refunded" : refundedMinor > 0 ? "partially_refunded" : "paid";
+    } else if (remote.status === "paid") throw new ApiError(503, "Captured payment details are not available yet. Retry shortly.");
+    // A previously confirmed charge must not regress to pending on a stale read.
+    if (!payment && ["paid", "partially_refunded", "refunded", "disputed", "reversed"].includes(order.status)) throw new ApiError(503, "Payment details are temporarily incomplete. Retry shortly.");
+    if (refundedMinor < (order.refundedMinor || 0)) throw new ApiError(503, "Refund details are temporarily incomplete. Retry shortly.");
+    const saved = await Model.findOneAndUpdate({ _id: order._id, reconciliationToken: token }, { $set: { status, active: status === "pending", refundedMinor, ...(payment ? { razorpayPaymentId: payment.id } : {}), ...(status === "paid" && !order.paidAt ? { paidAt: new Date() } : {}) } }, { new: true }).select(ORDER_FIELDS);
     if (!saved) throw new ApiError(503, "Payment status changed. Retry shortly.");
     await fulfillPublicPurchase(saved);
-    // Access checks also require a current enrollment and published,
-    // unarchived course. Never create assignments or reset learning progress here.
     return saved;
   } finally {
-    await PaymentOrder.updateOne({ _id: order._id, reconciliationToken: token }, { $unset: { reconciliationToken: 1, reconciliationLeaseUntil: 1 } });
+    await Model.updateOne({ _id: order._id, reconciliationToken: token }, { $unset: { reconciliationToken: 1, reconciliationLeaseUntil: 1 } });
   }
 }
-
-export async function handlePaymentEvent(event, stripe) {
-  const { mode, testMode } = requireStripeSettings(), PaymentOrder = paymentOrderModel(mode), StripeEvent = stripeEventModel(mode);
-  assertStripeEventMode(event);
-  if (!paymentEvents.has(event.type)) return { ignored: true };
-  if (!/^evt_[A-Za-z0-9_]+$/.test(event.id) || !Number.isSafeInteger(event.created)) throw new ApiError(400, "Invalid Stripe event.");
+export async function verifyCheckout(order, body, client) {
+  requireRazorpaySettings();
+  if (providerOf(order) !== "razorpay" || !order.razorpayOrderId || body.razorpay_order_id !== order.razorpayOrderId || !validRazorpayId(body.razorpay_payment_id, "pay") || !validSignature(`${order.razorpayOrderId}|${body.razorpay_payment_id}`, body.razorpay_signature, process.env.RAZORPAY_KEY_SECRET)) throw new ApiError(400, "Invalid Razorpay checkout signature.");
+  const payment = await client.fetchPayment(body.razorpay_payment_id);
+  if (payment.order_id !== order.razorpayOrderId || payment.id !== body.razorpay_payment_id || payment.amount !== order.amountMinor || payment.currency !== "INR") throw new ApiError(409, "This payment does not belong to your course purchase.");
+  return reconcileOrder(order._id, client);
+}
+export async function handlePaymentEvent(event, eventId, client) {
+  const { mode, testMode } = requireRazorpaySettings(), Model = paymentOrderModel(mode), Events = razorpayEventModel(mode);
+  if (!paymentEvents.has(event.event)) return { ignored: true };
+  if (typeof eventId !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(eventId)) throw new ApiError(400, "Invalid webhook event identifier.");
   const token = crypto.randomUUID();
-  try { await StripeEvent.create({ _id: event.id, type: event.type, token, leaseUntil: new Date(Date.now() + 90000) }); }
+  try { await Events.create({ _id: eventId, type: event.event, token, leaseUntil: new Date(Date.now() + 15000) }); }
   catch (error) {
     if (error.code !== 11000) throw error;
-    const previous = await StripeEvent.findById(event.id);
+    const previous = await Events.findById(eventId);
     if (previous.status === "processed") return { duplicate: true };
-    const claimed = await StripeEvent.updateOne({ _id: event.id, status: "processing", leaseUntil: { $lt: new Date() } }, { $set: { token, leaseUntil: new Date(Date.now() + 90000) } });
-    if (!claimed.modifiedCount) throw new ApiError(503, "Stripe event is being processed. Retry shortly.");
+    if (!(await Events.updateOne({ _id: eventId, leaseUntil: { $lt: new Date() } }, { $set: { token, leaseUntil: new Date(Date.now() + 15000) } })).modifiedCount) throw new ApiError(503, "The webhook is being processed. Retry shortly.");
   }
   try {
-    const object = event.data.object;
-    let orderId = object.metadata?.orderId, sessionId;
-    if (event.type.startsWith("checkout.session.")) sessionId = object.id;
-    let order;
-    if (orderId && mongoose.isValidObjectId(orderId)) order = await PaymentOrder.findById(orderId).select(SESSION_FIELDS);
-    if (!order && sessionId) order = await PaymentOrder.findOne({ stripeSessionId: sessionId }).select(SESSION_FIELDS);
+    const hintedOrder = event.payload?.order?.entity, hintedPayment = event.payload?.payment?.entity, refund = event.payload?.refund?.entity;
+    let remoteId = hintedOrder?.id || hintedPayment?.order_id;
+    // A stored capture lets refund delivery use the same two parallel provider
+    // reads as capture delivery, keeping acknowledgements within five seconds.
+    if (!remoteId && validRazorpayId(refund?.payment_id, "pay")) {
+      const known = await Model.findOne({ razorpayPaymentId: refund.payment_id, provider: "razorpay", testMode }).select(ORDER_FIELDS);
+      remoteId = known?.razorpayOrderId || (await client.fetchPayment(refund.payment_id)).order_id;
+    }
+    if (!validRazorpayId(remoteId, "order")) throw new ApiError(400, "The webhook is missing a valid payment order.");
+    let order = await Model.findOne({ razorpayOrderId: remoteId, provider: "razorpay", testMode }).select(ORDER_FIELDS);
     if (!order) {
-      let intentId = event.type.startsWith("payment_intent.") ? object.id : ref(object.payment_intent);
-      if (!intentId && event.type.startsWith("charge.dispute.") && ref(object.charge)) {
-        const charge = await stripe.charges.retrieve(ref(object.charge));
-        intentId = ref(charge.payment_intent);
-      }
-      if (intentId) {
-        order = await PaymentOrder.findOne({ stripePaymentIntentId: intentId }).select(SESSION_FIELDS);
-        if (!order) {
-          const intent = await stripe.paymentIntents.retrieve(intentId);
-          orderId = intent.metadata?.orderId;
-          if (mongoose.isValidObjectId(orderId)) order = await PaymentOrder.findById(orderId).select(SESSION_FIELDS);
-        }
-      }
+      const remote = await client.fetchOrder(remoteId), localId = remote.notes?.orderId;
+      if (mongoose.isValidObjectId(localId)) order = await Model.findOne({ _id: localId, provider: "razorpay", testMode }).select(ORDER_FIELDS);
+      if (order) order = await attachOrder(order, remote);
     }
-    if (order) {
-      if (!sessionId && !order.stripeSessionId) throw new ApiError(503, "Checkout session is not attached yet. Retry shortly.");
-      await reconcileOrder(order._id, sessionId, stripe, event.created);
-    }
-    await StripeEvent.updateOne({ _id: event.id, token }, { $set: { status: "processed", processedAt: new Date() }, $unset: { token: 1, leaseUntil: 1 } });
+    if (order) await reconcileOrder(order._id, client);
+    await Events.updateOne({ _id: eventId, token }, { $set: { status: "processed", processedAt: new Date() }, $unset: { token: 1, leaseUntil: 1 } });
     return { received: true, ignored: !order };
   } catch (error) {
-    await StripeEvent.updateOne({ _id: event.id, token }, { $set: { leaseUntil: new Date(0) } });
+    await Events.updateOne({ _id: eventId, token }, { $set: { leaseUntil: new Date(0) } });
     throw error;
   }
 }

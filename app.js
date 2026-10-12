@@ -21,7 +21,7 @@ import publicCourseRoutes from "./routes/publicCourseRoutes.js";
 import assessmentRoutes from "./routes/assessmentRoutes.js";
 import learningSupportRoutes from "./routes/learningSupportRoutes.js";
 import acquisitionRoutes from "./routes/acquisitionRoutes.js";
-import { stripeWebhook } from "./controllers/paymentController.js";
+import { razorpayWebhook, razorpayWebhookHealth } from "./controllers/paymentController.js";
 
 const app = express();
 const clientOrigin = process.env.CLIENT_URL || "http://localhost:5173";
@@ -50,9 +50,10 @@ app.use("/api", (req, res, next) => {
   if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && ((req.headers.origin && !allowedOrigins.has(req.headers.origin)) || req.headers["sec-fetch-site"] === "cross-site")) return res.status(403).json({ success: false, message: "Request origin is not allowed" });
   next();
 });
-// Exact endpoint only: Stripe signs the untouched bytes. This runs before JSON,
-// cookie/session parsing and sanitizers, and authenticates with Stripe's signature.
-app.post("/api/payments/webhook", express.raw({ type: "application/json", limit: "256kb" }), stripeWebhook);
+// Exact endpoint only: Razorpay signs the untouched bytes. This runs before JSON,
+// cookie/session parsing and sanitizers, and authenticates with the signature.
+app.get("/api/payments/razorpay/webhook", razorpayWebhookHealth);
+app.post("/api/payments/razorpay/webhook", express.raw({ type: "application/json", limit: "256kb" }), razorpayWebhook);
 // ---- Body parsing & logging ----
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));

@@ -13,12 +13,12 @@ import Progress from "../models/Progress.js";
 import Assessment from "../models/Assessment.js";
 import AssessmentAttempt from "../models/AssessmentAttempt.js";
 import { paymentOrderModel } from "../models/PaymentOrder.js";
-import { stripeMode } from "../services/stripeMode.js";
+import { paymentMode } from "../services/paymentSettings.js";
 
 test("authored assessments and attempts preserve entitlement, keys, server timing and immutable results (isolated MongoDB + HTTP)", { timeout: 90000 }, async (t) => {
   process.env.NODE_ENV = "test";
   await mongoose.connect(`mongodb://127.0.0.1:${process.env.TEST_MONGO_PORT || 27018}/lms_test_${crypto.randomBytes(6).toString("hex")}`, { serverSelectionTimeoutMS: 5000 });
-  await Promise.all([User, Session, Course, Category, Module, Enrollment, Progress, Assessment, AssessmentAttempt, paymentOrderModel(stripeMode())].map((m) => m.init()));
+  await Promise.all([User, Session, Course, Category, Module, Enrollment, Progress, Assessment, AssessmentAttempt, paymentOrderModel(paymentMode())].map((m) => m.init()));
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
   const base = `http://127.0.0.1:${server.address().port}/api`;
   const call = async (path, who, method = "GET", body) => {

@@ -2,12 +2,12 @@ import Course from "../models/Course.js";
 import Enrollment from "../models/Enrollment.js";
 import ApiError from "../utils/ApiError.js";
 import { paymentOrderModel } from "../models/PaymentOrder.js";
-import { stripeMode } from "./stripeMode.js";
+import { paymentMode } from "./paymentSettings.js";
 export const managesCourse = (course, user) => user.role === "admin" || (user.role === "instructor" && String(course.instructor._id || course.instructor) === String(user._id));
 // Publication controls discovery. Full learning content separately requires an
 // assignment or deliberate public enrollment, plus current-mode paid status.
 export function hasCourseEnrollment(course, enrollment) {
-  return Boolean(enrollment && (enrollment.assignedBy || course.visibility === "public" && (enrollment.publicFreeEnrollment || enrollment.publicPurchaseModes?.includes(stripeMode()))));
+  return Boolean(enrollment && (enrollment.assignedBy || course.visibility === "public" && (enrollment.publicFreeEnrollment || enrollment.publicPurchaseModes?.includes(paymentMode()))));
 }
 export async function courseEnrollment(course, user) {
   if (user.role !== "student" || !course.isPublished || course.archivedAt) return null;
@@ -40,7 +40,7 @@ export async function requireCourseNomination(courseId, user) {
 export async function requireCourseAccess(courseId, user) {
   const course = await requireCourseNomination(courseId, user);
   if (managesCourse(course, user) || !course.price) return course;
-  const mode = stripeMode();
+  const mode = paymentMode();
   const payment = await paymentOrderModel(mode).exists({ student: user._id, course: course._id, status: "paid", testMode: mode === "test" });
   if (!payment) {
     const error = new ApiError(402, "Payment is required to access this course.");

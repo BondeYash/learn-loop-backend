@@ -1,13 +1,13 @@
 import mongoose from "mongoose";
 import { paymentOrderModel } from "../models/PaymentOrder.js";
-import { stripeMode } from "./stripeMode.js";
+import { paymentMode } from "./paymentSettings.js";
 import { rupeesToMinor } from "./coursePricing.js";
 
 // Payment never filters nominated courses out of student lists. Summaries are
 // scoped to this authenticated student and expose no provider IDs or URLs.
 export async function withCoursePayments(courses, studentId) {
   if (!courses.length) return courses;
-  const mode = stripeMode(), testMode = mode === "test", PaymentOrder = paymentOrderModel(mode);
+  const mode = paymentMode(), testMode = mode === "test", PaymentOrder = paymentOrderModel(mode);
   const records = await PaymentOrder.aggregate([
     { $match: { student: new mongoose.Types.ObjectId(String(studentId)), course: { $in: courses.map((course) => new mongoose.Types.ObjectId(String(course._id))) }, testMode } },
     { $sort: { createdAt: -1 } },

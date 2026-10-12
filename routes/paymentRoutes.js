@@ -2,7 +2,7 @@ import { Router } from "express";
 import { body, param, query } from "express-validator";
 import { protect, authorize } from "../middleware/auth.js";
 import { validate } from "../validators/authValidators.js";
-import { checkout, orderStatus, paymentQuote, refreshOrderStatus, paymentHistory } from "../controllers/paymentController.js";
+import { checkout, orderStatus, paymentQuote, refreshOrderStatus, paymentHistory, verifyPayment } from "../controllers/paymentController.js";
 import rateLimit from "express-rate-limit";
 const router = Router();
 router.use(protect, authorize("student"));
@@ -12,4 +12,5 @@ router.post("/checkout", providerLimiter, body("courseId").isMongoId(), body("qu
 router.get("/orders", query("page").optional().isInt({ min: 1, max: 10000 }), query("limit").optional().isInt({ min: 1, max: 50 }), validate, paymentHistory);
 router.get("/orders/:orderId", param("orderId").isMongoId(), validate, orderStatus);
 router.post("/orders/:orderId/refresh", providerLimiter, param("orderId").isMongoId(), validate, refreshOrderStatus);
+router.post("/orders/:orderId/verify", providerLimiter, param("orderId").isMongoId(), body("razorpay_order_id").matches(/^order_[A-Za-z0-9]{1,100}$/), body("razorpay_payment_id").matches(/^pay_[A-Za-z0-9]{1,100}$/), body("razorpay_signature").matches(/^[a-f\d]{64}$/i), validate, verifyPayment);
 export default router;

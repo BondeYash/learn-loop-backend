@@ -3,7 +3,7 @@ import User from "../models/User.js";
 import Enrollment from "../models/Enrollment.js";
 import { publicCourseFilter } from "./publicCatalog.js";
 import { paymentOrderModel } from "../models/PaymentOrder.js";
-import { stripeMode } from "./stripeMode.js";
+import { paymentMode } from "./paymentSettings.js";
 import { ensureCourseReady } from "./courseReadiness.js";
 import { requireCourseAccess } from "./courseAccess.js";
 import ApiError from "../utils/ApiError.js";
@@ -26,7 +26,7 @@ export async function enrollPublicCourse(courseId, user, quotedAmountMinor) {
   await ensureCourseReady(course._id);
   let mode;
   if (course.price) {
-    mode = stripeMode();
+    mode = paymentMode();
     if (!await paymentOrderModel(mode).exists({ student: user._id, course: course._id, status: "paid", testMode: mode === "test" })) throw new ApiError(402, "Complete verified payment before enrolling in this paid course.");
   } else if (quotedAmountMinor !== 0) throw new ApiError(409, "The course price changed. Refresh before enrolling.");
   const enrollment = await savePublicEnrollment(user._id, course._id, mode);
