@@ -5,7 +5,7 @@ import { saveCourseEnrollment } from "./courseEnrollment.js";
 import { paymentOrderModel } from "../models/PaymentOrder.js";
 import { paymentMode } from "./paymentSettings.js";
 import { ensureCourseReady } from "./courseReadiness.js";
-import { requireCourseAccess } from "./courseAccess.js";
+import { courseEnrollment, hasPaymentWaiver, requireCourseAccess } from "./courseAccess.js";
 import ApiError from "../utils/ApiError.js";
 
 export async function fulfillPurchase(order) {
@@ -17,6 +17,11 @@ export async function enrollPublicCourse(courseId, user, quotedAmountMinor) {
   const course = await Course.findOne({ _id: courseId, ...publicCourseFilter });
   if (!course) throw new ApiError(404, "This public course is unavailable for enrollment.");
   await ensureCourseReady(course._id);
+  const existing = await courseEnrollment(course, user);
+  if (hasPaymentWaiver(existing)) {
+    await requireCourseAccess(course._id, user);
+    return { courseId: String(course._id), enrollmentId: String(existing._id), access: true };
+  }
   let mode;
   if (course.price) {
     mode = paymentMode();

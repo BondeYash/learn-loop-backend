@@ -6,7 +6,12 @@ import { paymentMode } from "./paymentSettings.js";
 import { saveCourseEnrollment } from "./courseEnrollment.js";
 export const managesCourse = (course, user) => user.role === "admin" || (user.role === "instructor" && String(course.instructor._id || course.instructor) === String(user._id));
 // Publication controls discovery. Full learning content separately requires an
-// assignment, free public enrollment or a purchase, plus current-mode paid status.
+// assignment, free public enrollment or a purchase. Paid courses also need a
+// current-mode payment or an explicit waiver attached to an instructor assignment.
+export const hasPaymentWaiver = (enrollment) => Boolean(enrollment?.assignedBy && enrollment.paymentWaivedAt);
+export async function coursePaymentWaived(courseId, studentId) {
+  return hasPaymentWaiver(await Enrollment.findOne({ course: courseId, student: studentId }).select("assignedBy paymentWaivedAt"));
+}
 export function hasCourseEnrollment(course, enrollment) {
   return Boolean(enrollment && (enrollment.assignedBy || enrollment.publicPurchaseModes?.includes(paymentMode()) || course.visibility === "public" && enrollment.publicFreeEnrollment));
 }
@@ -44,6 +49,7 @@ export async function requireCourseNomination(courseId, user) {
 export async function requireCourseAccess(courseId, user) {
   const course = await requireCourseNomination(courseId, user);
   if (managesCourse(course, user) || !course.price) return course;
+  if (await coursePaymentWaived(course._id, user._id)) return course;
   const mode = paymentMode();
   const payment = await paymentOrderModel(mode).exists({ student: user._id, course: course._id, status: "paid", testMode: mode === "test" });
   if (!payment) {

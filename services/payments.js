@@ -4,7 +4,7 @@ import User from "../models/User.js";
 import { paymentOrderModel } from "../models/PaymentOrder.js";
 import { razorpayEventModel } from "../models/RazorpayEvent.js";
 import ApiError from "../utils/ApiError.js";
-import { courseEnrollment, requireCheckoutEligibility } from "./courseAccess.js";
+import { courseEnrollment, coursePaymentWaived, hasPaymentWaiver, requireCheckoutEligibility } from "./courseAccess.js";
 import { fulfillPurchase } from "./publicEnrollment.js";
 import { ensureCourseReady } from "./courseReadiness.js";
 import { rupeesToMinor } from "./coursePricing.js";
@@ -25,7 +25,8 @@ export async function quoteCourse(courseId, user) {
     PaymentOrder.exists({ student: user._id, course: course._id, status: "paid", testMode }),
     PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode }),
   ]);
-  return { courseId: String(course._id), title: course.title, provider: "razorpay", amountMinor: course.price ? pending?.amountMinor ?? rupeesToMinor(course.price) : 0, currentAmountMinor: rupeesToMinor(course.price), currency: "inr", testMode, paid: Boolean(paid), requiresPayment: course.price > 0 && !paid, enrolled: Boolean(enrollment), enrollmentRequired: !enrollment, enrollmentType: course.price > 0 ? "purchase" : course.visibility === "public" ? "public" : "assigned", ...(course.price && pending ? { pendingOrderId: String(pending._id) } : {}) };
+  const waived = course.price > 0 && hasPaymentWaiver(enrollment);
+  return { courseId: String(course._id), title: course.title, provider: "razorpay", amountMinor: waived ? 0 : course.price ? pending?.amountMinor ?? rupeesToMinor(course.price) : 0, currentAmountMinor: rupeesToMinor(course.price), currency: "inr", testMode, paid: Boolean(paid), waived, requiresPayment: course.price > 0 && !paid && !waived, enrolled: Boolean(enrollment), enrollmentRequired: !enrollment, enrollmentType: waived ? "assigned" : course.price > 0 ? "purchase" : course.visibility === "public" ? "public" : "assigned", ...(course.price && pending && !waived ? { pendingOrderId: String(pending._id) } : {}) };
 }
 function orderRequest(order) {
   return { amount: order.amountMinor, currency: "INR", receipt: `ll_${order.testMode ? "test" : "live"}_${order._id}`, partial_payment: false, notes: { orderId: String(order._id), courseId: String(order.course), studentId: String(order.student), mode: order.testMode ? "test" : "live" } };
@@ -91,6 +92,7 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   const { mode, testMode } = requireRazorpaySettings(), Model = paymentOrderModel(mode);
   if (typeof requestKey !== "string" || !/^[A-Za-z0-9_-]{16,80}$/.test(requestKey)) throw new ApiError(400, "Use a stable payment request identifier when retrying checkout.");
   const course = await requireCheckoutEligibility(courseId, user);
+  if (await coursePaymentWaived(course._id, user._id)) throw new ApiError(409, "Your instructor has granted free access. Refresh to open the course without paying.");
   await ensureCourseReady(course._id);
   const amountMinor = rupeesToMinor(course.price);
   if (amountMinor < 100) throw new ApiError(400, "A paid Razorpay course must cost at least INR 1.00. Free courses use free enrollment.");
@@ -116,6 +118,7 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   order = await reconcileOrder(order._id, client);
   if (order.status !== "pending") throw new ApiError(409, "This payment attempt finished. Refresh to see its current status.");
   await requireCheckoutEligibility(course._id, user);
+  if (await coursePaymentWaived(course._id, user._id)) throw new ApiError(409, "Your instructor has granted free access. Refresh to open the course without paying.");
   if (!await User.exists({ _id: user._id, status: "active", mustChangePassword: false, authVersion: user.authVersion || 0 })) throw new ApiError(409, "Your account changed while opening checkout. Sign in again.");
   return { order: publicOrder(order), checkout: { provider: "razorpay", keyId: process.env.RAZORPAY_KEY_ID, orderId: order.razorpayOrderId, amount: order.amountMinor, currency: "INR", name: "Praneet Vidyapeeth", description: order.title, prefill: { name: user.name, email: user.email } } };
 }

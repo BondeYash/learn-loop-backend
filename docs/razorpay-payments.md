@@ -40,7 +40,11 @@ Use test keys and a separately configured Test-mode webhook to exercise the acco
 - The browser loads Razorpay's official checkout script only when the student chooses to pay. Success calls `POST /api/payments/orders/:orderId/verify`. The API verifies HMAC using the saved provider order ID and API secret, then reads canonical order/payment state. Authorization or a client success callback alone never opens lessons.
 - Raw webhook bytes are authenticated with `X-Razorpay-Signature` before JSON/session middleware. Event IDs prevent duplicate processing, failed delivery can retry, and canonical reads prevent late failed events from undoing capture. Known captures allow parallel order/payment reads on refund delivery.
 - `GET /api/payments/orders/:orderId` returns the saved status; a manual `/refresh` reconciles it with Razorpay. Captured purchases create enrollment idempotently for either visibility setting. Missing enrollment from prior paid records is repaired when the student opens their library or course. Instructor assignments remain separate and optional for buyers; archiving, unpublishing and suspended accounts retain access controls.
-- Canonical partial/full refunds relock paid access. Dashboard refund creation remains an operator action. This release does not automatically charge, capture, refund or pay instructors.
+- Canonical partial/full refunds relock access based on that payment; an explicit instructor free-access grant remains valid until removed. Dashboard refund creation remains an operator action. This release does not automatically charge, capture, refund or pay instructors.
+
+## Instructor free access
+
+Instructors can grant complimentary access to selected registered students from the course curriculum. The API records `paymentWaivedAt` and `paymentWaivedBy` on their instructor assignment. It bypasses payment only for that student/course, without creating a paid order or changing the public price. The quote and library identify the waiver, and checkout refuses payment while it applies. Publication, archive, account and ownership checks still apply. Removing the assignment removes the waiver but preserves paid purchases and progress. Existing assignments remain unchanged until an instructor explicitly grants free access.
 
 ## Existing records and limitations
 
