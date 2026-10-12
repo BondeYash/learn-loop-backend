@@ -7,7 +7,7 @@ const schema = new mongoose.Schema({
   course: { type: mongoose.Schema.Types.ObjectId, ref: "Course", required: true, index: true },
   instructor: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   title: { type: String, required: true, maxlength: 160 },
-  enrollmentType: { type: String, enum: ["assigned", "public"], default: "assigned", immutable: true },
+  enrollmentType: { type: String, enum: ["assigned", "public", "purchase"], default: "assigned", immutable: true },
   publicEnrollmentRequestedAt: Date,
   currency: { type: String, enum: ["inr"], default: "inr" },
   amountMinor: { type: Number, required: true, min: 50, max: 99999999, validate: integer },

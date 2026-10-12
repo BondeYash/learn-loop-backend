@@ -3,22 +3,26 @@ import Enrollment from "../models/Enrollment.js";
 import ApiError from "../utils/ApiError.js";
 import { paymentOrderModel } from "../models/PaymentOrder.js";
 import { paymentMode } from "./paymentSettings.js";
+import { saveCourseEnrollment } from "./courseEnrollment.js";
 export const managesCourse = (course, user) => user.role === "admin" || (user.role === "instructor" && String(course.instructor._id || course.instructor) === String(user._id));
 // Publication controls discovery. Full learning content separately requires an
-// assignment or deliberate public enrollment, plus current-mode paid status.
+// assignment, free public enrollment or a purchase, plus current-mode paid status.
 export function hasCourseEnrollment(course, enrollment) {
-  return Boolean(enrollment && (enrollment.assignedBy || course.visibility === "public" && (enrollment.publicFreeEnrollment || enrollment.publicPurchaseModes?.includes(paymentMode()))));
+  return Boolean(enrollment && (enrollment.assignedBy || enrollment.publicPurchaseModes?.includes(paymentMode()) || course.visibility === "public" && enrollment.publicFreeEnrollment));
 }
 export async function courseEnrollment(course, user) {
   if (user.role !== "student" || !course.isPublished || course.archivedAt) return null;
   const enrollment = await Enrollment.findOne({ student: user._id, course: course._id });
-  return hasCourseEnrollment(course, enrollment) ? enrollment : null;
+  if (hasCourseEnrollment(course, enrollment)) return enrollment;
+  const mode = paymentMode();
+  if (await paymentOrderModel(mode).exists({ student: user._id, course: course._id, status: "paid", testMode: mode === "test" })) return saveCourseEnrollment(user._id, course._id, mode);
+  return null;
 }
 export async function requireCheckoutEligibility(courseId, user) {
   const course = await Course.findById(courseId);
   if (!course) throw new ApiError(404, "Course not found");
   if (course.archivedAt) throw new ApiError(410, "This course has been archived and is unavailable.");
-  if (user.role === "student" && course.isPublished && course.visibility === "public") return course;
+  if (user.role === "student" && course.isPublished && (course.price > 0 || course.visibility === "public")) return course;
   return requireCourseNomination(courseId, user);
 }
 export function catalogOutline(modules) {

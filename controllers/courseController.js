@@ -13,6 +13,7 @@ import { archiveCourse, restoreCourse, courseCurriculum, ensureCategory, require
 import { withCoursePayments } from "../services/coursePayments.js";
 import { publicCourseFields, validatePublicCourseChanges } from "../services/publicCatalog.js";
 import { currentProgress } from "../services/currentProgress.js";
+import { restorePurchasedEnrollments } from "../services/courseEnrollment.js";
 
 const allowedFields = ["title", "description", "category", "price", "level", "language", "requirements", "learningOutcomes", ...publicCourseFields];
 const pickCourseFields = (body) => Object.fromEntries(allowedFields.filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
@@ -21,6 +22,7 @@ export const listCourses = asyncHandler(async (req, res) => {
   let filter = req.user.role === "admin" ? {} : { instructor: req.user._id };
   let assignments = [];
   if (req.user.role === "student") {
+    await restorePurchasedEnrollments(req.user._id);
     assignments = await Enrollment.find({ student: req.user._id }).select("student course status assignedBy publicFreeEnrollment publicPurchaseModes");
     filter = { isPublished: true };
   }

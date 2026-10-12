@@ -32,5 +32,5 @@ export const assignStudents = asyncHandler(async (req, res) => {
 export const revokeAssignment = asyncHandler(async (req, res) => {
   await requireCourseOwner(req.params.id, req.user);
   await Enrollment.updateOne({ course: req.params.id, student: req.params.studentId }, { $unset: { assignedBy: "" } });
-  return new ApiResponse(res, 200, "Instructor assignment removed. Learning progress and public enrollments are retained.", {});
+  return new ApiResponse(res, 200, "Instructor assignment removed. Learning progress, purchases and public enrollments are retained.", {});
 });

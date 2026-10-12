@@ -9,7 +9,7 @@ import { ensureCourseReady } from "./courseReadiness.js";
 export const publicCourseFields = ["visibility", "examName", "summary", "audience", "publicInstructorName", "publicInstructorBio", "supportEmail", "supportUrl", "termsUrl", "privacyPolicyUrl", "refundPolicyUrl", "previewLesson"];
 export const publicCourseFilter = { visibility: "public", isPublished: true, archivedAt: null };
 // Published metadata is discoverable independently of self-enrollment consent.
-// Keep the stricter publicCourseFilter for enrollment and sample access.
+// Keep the stricter publicCourseFilter for free enrollment and sample access.
 export const catalogCourseFilter = { isPublished: true, archivedAt: null };
 export const publicCourseSelection = "title slug description category thumbnail.url price language level requirements learningOutcomes publishedAt " + publicCourseFields.join(" ");
 export function safePublicUrl(value) {
@@ -35,7 +35,7 @@ export async function courseCatalogAvailability(course) {
   let ready = true;
   try { await ensureCourseReady(course._id); }
   catch (error) { if (error.statusCode !== 409) throw error; ready = false; }
-  return { enrollment: course.visibility === "public" ? "public" : "assignment", ready };
+  return { enrollment: course.price > 0 ? "purchase" : course.visibility === "public" ? "public" : "assignment", ready };
 }
 export function publicCourseCard(course, availability) {
   // Explicit DTO: account/profile fields, private object keys and unpublished

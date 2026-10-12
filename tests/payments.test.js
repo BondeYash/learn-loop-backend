@@ -9,6 +9,7 @@ import Category from "../models/Category.js";
 import Module from "../models/Module.js";
 import Lesson from "../models/Lesson.js";
 import Enrollment from "../models/Enrollment.js";
+import Assessment from "../models/Assessment.js";
 import { paymentOrderModel } from "../models/PaymentOrder.js";
 import { razorpayEventModel } from "../models/RazorpayEvent.js";
 import { razorpayClient, razorpayReadiness, validSignature } from "../services/razorpayClient.js";
@@ -85,7 +86,7 @@ for (const mode of ["test", "live"]) test(`Razorpay ${mode}: real cookie auth, r
     await t.test("authorization, server price, readiness and payment DTO privacy", async () => {
       const u = await learner(), stranger = await learner(false);
       assert.equal((await call(`/courses/${course._id}`, u)).status, 402);
-      assert.equal((await checkout(stranger)).status, 403); assert.equal((await checkout(owner)).status, 403); assert.equal((await checkout(null)).status, 401);
+      assert.equal((await checkout(stranger)).status, 201); assert.equal((await checkout(owner)).status, 403); assert.equal((await checkout(null)).status, 401);
       assert.equal((await checkout(u, { amount: 12000 })).status, 409); assert.equal((await checkout(u, { key: "short" })).status, 400);
       const data = await ready(u); assert.equal(data.order.provider, "razorpay"); assert.equal(data.order.testMode, testMode); assert.equal(data.checkout.amount, 12345); assert.equal(data.checkout.keyId, process.env.RAZORPAY_KEY_ID); assert.equal(data.order.checkoutExpiresAt, undefined);
       assert.equal((await call(`/courses/${course._id}`, owner, "PATCH", { price: "0.50" })).status, 400);
@@ -163,13 +164,86 @@ for (const mode of ["test", "live"]) test(`Razorpay ${mode}: real cookie auth, r
       fake.refund(p.id,12345);assert.equal((await webhook(fake.event("refund.processed",{payment_id:p.id}))).status,200);assert.equal((await state(data)).status,"refunded");
       fake.refund(p.id,0);assert.equal((await refresh(u,data)).status,503);assert.equal((await state(data)).refundedMinor,12345);
     });
-    await t.test("public purchase auto-enrolls once; public consent never becomes a private assignment", async () => {
+    await t.test("public purchase auto-enrolls once and stays accessible when free-enrollment policy changes", async () => {
       const u=await learner(false),r=await checkout(u,{selected:publicCourse});assert.equal(r.status,201);const data=r.body.data;
       assert.equal(await Enrollment.countDocuments({student:u.id,course:publicCourse._id}),0);
       const p=fake.pay(data.checkout.orderId);assert.equal((await webhook(fake.event("payment.captured",p))).status,200);
       assert.equal((await refresh(u,data)).body.data.order.canAccess,true);const enrollment=await Enrollment.findOne({student:u.id,course:publicCourse._id});assert.equal(enrollment.assignedBy,undefined);assert.deepEqual([...enrollment.publicPurchaseModes],[mode]);
       assert.equal(await Enrollment.countDocuments({student:u.id,course:publicCourse._id}),1);
-      await Course.updateOne({_id:publicCourse._id},{$set:{visibility:"private"}});assert.equal((await refresh(u,data)).body.data.order.canAccess,false);await Course.updateOne({_id:publicCourse._id},{$set:{visibility:"public"}});
+      await Course.updateOne({_id:publicCourse._id},{$set:{visibility:"private"}});assert.equal((await refresh(u,data)).body.data.order.canAccess,true);await Course.updateOne({_id:publicCourse._id},{$set:{visibility:"public"}});
+    });
+    await t.test("private paid course can be bought without assignment and immediately unlocks learning", async () => {
+      const u = await learner(false), lesson = await Lesson.findOne({ course: course._id });
+      const assessment = await Assessment.create({ course: course._id, title: "Purchased mock test", kind: "mock", durationMinutes: 10, slot: 0, status: "published", questionCount: 1, questions: [{ prompt: "One plus one?", options: ["One", "Two"], correctIndex: 1 }] });
+      const protectedPaths = [`/courses/${course._id}/notes`, `/courses/${course._id}/progress`, `/courses/${course._id}/assessments`];
+      for (const path of protectedPaths) assert.equal((await call(path, u)).status, 403);
+      assert.equal((await call(`/assessments/${assessment._id}/attempts`, u, "POST", {})).status, 403);
+      const before = await call(`/courses/${course._id}`, u); assert.equal(before.body.data.access.videos, false); assert.ok(!JSON.stringify(before.body).includes(lesson.content));
+      const detail = await call(`/public/courses/${course.slug}`); assert.deepEqual(detail.body.data.course.availability, { enrollment: "purchase", ready: true });
+      assert.equal((await call(`/payments/courses/${course._id}/quote`, u)).body.data.quote.enrollmentType, "purchase");
+      const data = await ready(u); assert.equal(data.order.enrollmentType, "purchase");
+      const authorized = fake.pay(data.checkout.orderId, "authorized"); assert.equal((await verify(u, data, authorized)).body.data.order.canAccess, false);
+      assert.equal(await Enrollment.countDocuments({ student: u.id, course: course._id }), 0);
+      const p = fake.pay(data.checkout.orderId); assert.equal((await verify(u, data, p)).body.data.order.canAccess, true);
+      const enrolled = await Enrollment.findOne({ student: u.id, course: course._id }); assert.equal(enrolled.assignedBy, undefined); assert.deepEqual([...enrolled.publicPurchaseModes], [mode]);
+      for (const path of protectedPaths) assert.equal((await call(path, u)).status, 200);
+      const unlocked = await call(`/courses/${course._id}`, u); assert.equal(unlocked.body.data.access.assigned, false); assert.equal(unlocked.body.data.access.videos, true); assert.ok(JSON.stringify(unlocked.body).includes(lesson.content));
+      const attempt = await call(`/assessments/${assessment._id}/attempts`, u, "POST", {}); assert.equal(attempt.status, 200, JSON.stringify(attempt.body));
+      assert.equal((await call(`/lessons/${lesson._id}/complete`, u, "POST", {})).status, 200);
+      const mine = (await call("/enrollments/me", u)).body.data.enrollments; assert.equal(mine.length, 1); assert.equal(mine[0].course.payment.paid, true); assert.equal(mine[0].status, "completed");
+      const card = (await call("/courses", u)).body.data.courses.find(c => String(c._id) === String(course._id)); assert.deepEqual(card.access, { assigned: false, enrolled: true, videos: true, status: "completed" });
+      // Removing an old instructor assignment must not revoke a purchase.
+      await Enrollment.updateOne({ _id: enrolled._id }, { $set: { assignedBy: owner.id } });
+      assert.equal((await call(`/courses/${course._id}/assignments/${u.id}`, owner, "DELETE")).status, 200);
+      assert.equal((await call(`/courses/${course._id}`, u)).body.data.access.videos, true);
+      // Repair a missing purchase marker without resetting completion.
+      await Enrollment.updateOne({ _id: enrolled._id }, { $unset: { publicPurchaseModes: "" } });
+      await call("/enrollments/me", u); assert.equal((await Enrollment.findById(enrolled._id)).status, "completed");
+      // A lost enrollment also recovers from the saved paid order on a direct visit.
+      await Enrollment.deleteOne({ _id: enrolled._id });
+      assert.equal((await call(`/courses/${course._id}`, u)).body.data.access.videos, true);
+      assert.equal(await Enrollment.countDocuments({ student: u.id, course: course._id }), 1);
+      fake.refund(p.id, 12345); assert.equal((await webhook(fake.event("refund.processed", { payment_id: p.id }))).status, 200);
+      for (const path of protectedPaths) assert.equal((await call(path, u)).status, 402);
+      assert.equal((await call(`/assessments/${assessment._id}/attempts`, u, "POST", {})).status, 402);
+    });
+    await t.test("webhook alone enrolls private buyers; retries preserve one enrollment and publication gates access", async () => {
+      const u = await learner(false), data = await ready(u), p = fake.pay(data.checkout.orderId), event = fake.event("order.paid", fake.orders.get(p.order_id)), id = crypto.randomUUID();
+      assert.equal((await webhook(event, { id })).status, 200); assert.equal((await webhook(event, { id })).body.duplicate, true);
+      assert.equal((await call("/enrollments/me", u)).body.data.enrollments.length, 1);
+      assert.equal((await call(`/courses/${course._id}`, u)).body.data.access.videos, true);
+      assert.equal(await Enrollment.countDocuments({ student: u.id, course: course._id }), 1);
+      for (const changes of [{ isPublished: false }, { archivedAt: new Date() }]) {
+        await Course.updateOne({ _id: course._id }, { $set: changes });
+        assert.ok([403,410].includes((await checkout(await learner(false))).status));
+        assert.equal((await refresh(u, data)).body.data.order.canAccess, false);
+        assert.equal((await call("/enrollments/me", u)).body.data.enrollments.length, 0);
+        await Course.updateOne({ _id: course._id }, { $set: { isPublished: true, archivedAt: null } });
+      }
+      assert.equal((await call(`/courses/${course._id}`, u)).body.data.access.videos, true);
+    });
+    await t.test("instructor publishes a ready paid course without assigning anyone", async () => {
+      const c = await makeCourse("private"), u = await learner(false);
+      await Course.updateOne({ _id: c._id }, { $set: { isPublished: false } });
+      assert.equal((await checkout(u, { selected: c })).status, 403);
+      assert.equal((await call(`/courses/${c._id}/publish`, owner, "PATCH", { published: true })).status, 200);
+      assert.equal(await Enrollment.countDocuments({ course: c._id }), 0);
+      assert.equal((await checkout(u, { selected: c })).status, 201);
+      const quote = (await call(`/payments/courses/${c._id}/quote`, u)).body.data.quote; assert.equal(quote.enrollmentType, "purchase"); assert.equal(quote.enrolled, false);
+    });
+    await t.test("saved purchases restore the student library while other modes and refunded orders cannot enroll", async () => {
+      const u = await learner(false), foreign = await learner(false), refunded = await learner(false);
+      const saved = { course: course._id, instructor: owner.id, title: course.title, amountMinor: 12345, status: "paid", active: false };
+      await Model.create({ ...saved, student: u.id, requestKey: "restore_paid" });
+      await paymentOrderModel(testMode ? "live" : "test").create({ ...saved, student: foreign.id, requestKey: "restore_foreign" });
+      await Model.create({ ...saved, student: refunded.id, requestKey: "restore_refunded", status: "refunded", refundedMinor: 12345 });
+      assert.equal((await call("/enrollments/me", u)).body.data.enrollments.length, 1);
+      assert.equal((await call(`/courses/${course._id}`, u)).body.data.access.videos, true);
+      for (const student of [foreign, refunded]) {
+        assert.equal((await call("/enrollments/me", student)).body.data.enrollments.length, 0);
+        assert.equal((await call(`/courses/${course._id}`, student)).body.data.access.videos, false);
+        assert.equal(await Enrollment.countDocuments({ student: student.id }), 0);
+      }
     });
     await t.test("old paid records remain accessible; pending historical records block replacement charges; modes are isolated", async () => {
       const old=await learner(), pending=await learner(), other=await learner();

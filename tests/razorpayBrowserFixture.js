@@ -20,7 +20,7 @@ await Promise.all(Object.values(mongoose.models).map(m=>m.init()));
 const fake=providerFixture();app.locals.razorpayClient=fake;
 const users={};for(const [name,role] of [["owner","instructor"],["student","student"],["second","student"],["third","student"]]){const password=crypto.randomBytes(20).toString("hex"),email=`${name}@payment-fixture.invalid`,u=await User.create({name:`Synthetic ${name}`,email,password,role});users[name]={id:String(u._id),email,password};}
 const category=await Category.create({name:"Synthetic payment course"});
-const course=await Course.create({title:"Synthetic Razorpay course",description:"Synthetic public paid learning",category:category._id,instructor:users.owner.id,visibility:"public",isPublished:true,price:123.45});
+const course=await Course.create({title:"Synthetic Razorpay course",description:"Synthetic paid learning with automatic enrollment",category:category._id,instructor:users.owner.id,visibility:"private",isPublished:false,price:123.45});
 const chapter=await Module.create({course:course._id,title:"Lessons",order:0});await Lesson.create({course:course._id,module:chapter._id,title:"Protected paid lesson",contentType:"text",content:"Synthetic learning unlocked after verified payment.",order:0});
 const server=await new Promise(resolve=>{const s=app.listen(0,"127.0.0.1",()=>resolve(s));});const origin=`http://127.0.0.1:${server.address().port}`;
 console.log(JSON.stringify({apiOrigin:origin,courseId:String(course._id),slug:course.slug,users}));
@@ -32,7 +32,9 @@ for await(const line of readline.createInterface({input:process.stdin})){
   if(c.action==="pay"){const p=fake.pay(c.orderId,c.status||"captured");result={razorpay_order_id:p.order_id,razorpay_payment_id:p.id,razorpay_signature:sign(`${p.order_id}|${p.id}`,process.env.RAZORPAY_KEY_SECRET)};if(c.webhook)result.webhook=await deliver(fake.event(p.status==="failed"?"payment.failed":"payment.captured",p));}
   else if(c.action==="refund"){const p=fake.refund(c.paymentId,c.amount);result=await deliver(fake.event("refund.processed",{id:"rfnd_synthetic",payment_id:p.id,amount:c.amount,status:"processed"}));}
   else if(c.action==="stats")result={orders:await paymentOrderModel().countDocuments({}),enrollments:await Enrollment.countDocuments({course:course._id}),creates:fake.creates};
-  else if(c.action==="private"){await Course.updateOne({_id:course._id},{$set:{visibility:"private"}});result={updated:true};}
+  else if(c.action==="missingEnrollment"){await Enrollment.deleteOne({student:users[c.student].id,course:course._id});result={updated:true};}
+  else if(c.action==="unpublish"){await Course.updateOne({_id:course._id},{$set:{isPublished:false}});result={updated:true};}
+  else if(c.action==="assignments")result={assignments:await Enrollment.countDocuments({course:course._id,assignedBy:{$exists:true}})};
   else if(c.action==="stop")await close();else result={error:"Unknown command"};
   console.log(JSON.stringify(result));
  }catch(e){console.log(JSON.stringify({error:e.message}));}

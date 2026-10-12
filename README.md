@@ -2,7 +2,7 @@
 
 Instructor/admin-authored chapter quizzes and timed course mock tests, protected attempts, server scoring, results and own history are documented in [assessments](docs/assessments.md). No assessment content is seeded.
 
-LessonLoop supports government-exam learning with a deliberately public course catalog and selected samples alongside protected learning content. Existing courses stay private by default. Read [public discovery, privacy controls and rollout](docs/public-discovery.md) for discovery behavior and [public enrollment](docs/public-enrollment.md) for self-service access.
+LessonLoop supports government-exam learning with a deliberately public course catalog and selected samples alongside protected learning content. Private remains the default for samples and free enrollment. Every published paid course can be purchased for automatic student access. Read [public discovery, privacy controls and rollout](docs/public-discovery.md) for discovery behavior and [public enrollment](docs/public-enrollment.md) for self-service access.
 
 ## Admin and course management release
 
@@ -43,7 +43,7 @@ Startup checks MongoDB and R2, and creates the General category if missing. `/ap
 1. Register as a student, or sign in with an instructor account created by an administrator. First-time instructors must change their temporary password.
 2. Enter course details. The updated frontend creates a default Lessons module; extra modules are optional.
 3. Select a precompressed H.264/AAC MP4, up to 2 GiB and four hours. Convert WebM/MOV/MKV externally first and preview with sound. Wait for **Ready to play** and preview it.
-4. Add optional PDF notes. In **Assign students**, choose registered addresses; assignment opens access after readiness checks, without a separate publication step.
+4. Add optional PDF notes, then click **Publish course** at the top of the curriculum. Students can buy published paid courses and get access automatically. Free courses use public enrollment or instructor assignments; assigning can also publish a ready course.
 5. Assigned students sign in, open the course, play/seek lessons and mark completion. Completion reflects the current curriculum when lessons change.
 
 ## Direct uploads

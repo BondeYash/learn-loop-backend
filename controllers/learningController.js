@@ -7,7 +7,9 @@ import Progress from "../models/Progress.js";
 import { currentProgress, withCurrentCompletion } from "../services/currentProgress.js";
 import { hasCourseEnrollment, requireCourseAccess } from "../services/courseAccess.js";
 import { withCoursePayments } from "../services/coursePayments.js";
+import { restorePurchasedEnrollments } from "../services/courseEnrollment.js";
 export const myEnrollments = asyncHandler(async (req, res) => {
+  await restorePurchasedEnrollments(req.user._id);
   const enrollments = await Enrollment.find({ student: req.user._id }).populate({ path: "course", match: { isPublished: true, archivedAt: null }, populate: [{ path: "instructor", select: "name" }, { path: "category", select: "name" }] });
   const visible = enrollments.filter((item) => item.course && hasCourseEnrollment(item.course, item)).map((item) => item.toObject());
   const courses = new Map((await withCoursePayments(visible.map((item) => item.course), req.user._id)).map((course) => [String(course._id), course]));

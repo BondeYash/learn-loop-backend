@@ -35,11 +35,11 @@ Use test keys and a separately configured Test-mode webhook to exercise the acco
 
 ## Implemented flow
 
-- The authenticated student gets a server quote. Private courses require instructor assignment; published public courses allow deliberate self-service purchase.
+- The authenticated student gets a server quote. Every published, ready paid course allows a deliberate student purchase without assignment, including private and legacy courses. Free private courses keep instructor-controlled enrollment.
 - `POST /api/payments/checkout` saves an immutable quote and provider request, creates an order on the backend and returns its public checkout configuration. `Idempotency-Key` identifies a stable attempt. A lease and unique active student/course record prevent concurrent order creation. Interrupted creation is recovered by its exact receipt; an uncertain POST is not repeated automatically.
 - The browser loads Razorpay's official checkout script only when the student chooses to pay. Success calls `POST /api/payments/orders/:orderId/verify`. The API verifies HMAC using the saved provider order ID and API secret, then reads canonical order/payment state. Authorization or a client success callback alone never opens lessons.
 - Raw webhook bytes are authenticated with `X-Razorpay-Signature` before JSON/session middleware. Event IDs prevent duplicate processing, failed delivery can retry, and canonical reads prevent late failed events from undoing capture. Known captures allow parallel order/payment reads on refund delivery.
-- `GET /api/payments/orders/:orderId` returns the saved status; a manual `/refresh` reconciles it with Razorpay. Captured public purchases create public enrollment idempotently. Private assignments remain separate; archiving, unpublishing and suspended accounts retain access controls.
+- `GET /api/payments/orders/:orderId` returns the saved status; a manual `/refresh` reconciles it with Razorpay. Captured purchases create enrollment idempotently for either visibility setting. Missing enrollment from prior paid records is repaired when the student opens their library or course. Instructor assignments remain separate and optional for buyers; archiving, unpublishing and suspended accounts retain access controls.
 - Canonical partial/full refunds relock paid access. Dashboard refund creation remains an operator action. This release does not automatically charge, capture, refund or pay instructors.
 
 ## Existing records and limitations
@@ -52,7 +52,7 @@ Refund events synchronize payments; chargebacks/disputes, reconciliation jobs fo
 
 ## Verification
 
-`node --test tests/payments.test.js` exercises real HTTP cookie auth, raw HMAC webhooks and disposable MongoDB for both modes, with synthetic provider APIs. It covers stable creation/recovery, price/ownership/mode validation, captured-only access, duplicate/out-of-order delivery, refunds, public enrollment and preserved historical purchases.
+`node --test tests/payments.test.js` exercises real HTTP cookie auth, raw HMAC webhooks and disposable MongoDB for both modes, with synthetic provider APIs. It covers stable creation/recovery, price/ownership/mode validation, captured-only access, duplicate/out-of-order delivery, refunds, unassigned private/public purchases, automatic dashboard enrollment, purchased mock-test access, publication and archive checks, and recovered historical purchases.
 
 The paired frontend has checkout unit tests and `tests/payments_browser.py`, which forwards real UI requests to this API and disposable MongoDB while replacing only Razorpay provider calls and checkout SDK. No automated test reads live credentials or performs a real charge/refund/payout.
 

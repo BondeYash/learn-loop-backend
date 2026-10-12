@@ -5,7 +5,7 @@ import { paymentOrderModel } from "../models/PaymentOrder.js";
 import { razorpayEventModel } from "../models/RazorpayEvent.js";
 import ApiError from "../utils/ApiError.js";
 import { courseEnrollment, requireCheckoutEligibility } from "./courseAccess.js";
-import { fulfillPublicPurchase } from "./publicEnrollment.js";
+import { fulfillPurchase } from "./publicEnrollment.js";
 import { ensureCourseReady } from "./courseReadiness.js";
 import { rupeesToMinor } from "./coursePricing.js";
 import { paymentMode } from "./paymentSettings.js";
@@ -25,7 +25,7 @@ export async function quoteCourse(courseId, user) {
     PaymentOrder.exists({ student: user._id, course: course._id, status: "paid", testMode }),
     PaymentOrder.findOne({ student: user._id, course: course._id, active: true, testMode }),
   ]);
-  return { courseId: String(course._id), title: course.title, provider: "razorpay", amountMinor: course.price ? pending?.amountMinor ?? rupeesToMinor(course.price) : 0, currentAmountMinor: rupeesToMinor(course.price), currency: "inr", testMode, paid: Boolean(paid), requiresPayment: course.price > 0 && !paid, enrolled: Boolean(enrollment), enrollmentRequired: !enrollment, enrollmentType: course.visibility === "public" ? "public" : "assigned", ...(course.price && pending ? { pendingOrderId: String(pending._id) } : {}) };
+  return { courseId: String(course._id), title: course.title, provider: "razorpay", amountMinor: course.price ? pending?.amountMinor ?? rupeesToMinor(course.price) : 0, currentAmountMinor: rupeesToMinor(course.price), currency: "inr", testMode, paid: Boolean(paid), requiresPayment: course.price > 0 && !paid, enrolled: Boolean(enrollment), enrollmentRequired: !enrollment, enrollmentType: course.price > 0 ? "purchase" : course.visibility === "public" ? "public" : "assigned", ...(course.price && pending ? { pendingOrderId: String(pending._id) } : {}) };
 }
 function orderRequest(order) {
   return { amount: order.amountMinor, currency: "INR", receipt: `ll_${order.testMode ? "test" : "live"}_${order._id}`, partial_payment: false, notes: { orderId: String(order._id), courseId: String(order.course), studentId: String(order.student), mode: order.testMode ? "test" : "live" } };
@@ -101,7 +101,7 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   if (!order) order = await Model.findOne({ student: user._id, course: course._id, active: true, testMode }).select(ORDER_FIELDS);
   if (!order) {
     if (quotedAmountMinor !== amountMinor) throw new ApiError(409, "The course price changed. Refresh before paying.");
-    const initial = { _id: new mongoose.Types.ObjectId(), provider: "razorpay", student: user._id, course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", testMode, enrollmentType: course.visibility === "public" ? "public" : "assigned" };
+    const initial = { _id: new mongoose.Types.ObjectId(), provider: "razorpay", student: user._id, course: course._id, instructor: course.instructor, title: course.title, amountMinor, currency: "inr", testMode, enrollmentType: course.price > 0 ? "purchase" : course.visibility === "public" ? "public" : "assigned" };
     initial.checkoutContract = { version: 1, keyId: process.env.RAZORPAY_KEY_ID, request: orderRequest(initial) };
     try { order = await Model.findOneAndUpdate({ student: user._id, requestKey: hash, testMode }, { $setOnInsert: initial }, { upsert: true, new: true, runValidators: true }).select(ORDER_FIELDS); }
     catch (error) {
@@ -112,7 +112,6 @@ export async function startCheckout(courseId, user, requestKey, quotedAmountMino
   if (!order || providerOf(order) !== "razorpay") throw new ApiError(409, "An earlier payment record needs administrator review before a new checkout can open.");
   if (String(order.course) !== String(course._id) || quotedAmountMinor !== order.amountMinor) throw new ApiError(409, "An earlier payment uses different course details. Review its status before paying.");
   if (order.status !== "pending") throw new ApiError(409, "This payment attempt finished. Refresh the status before starting another attempt.");
-  if (course.visibility === "public" && !order.publicEnrollmentRequestedAt) order = await Model.findByIdAndUpdate(order._id, { $set: { publicEnrollmentRequestedAt: new Date() } }, { new: true }).select(ORDER_FIELDS);
   order = await ensureProviderOrder(order, client);
   order = await reconcileOrder(order._id, client);
   if (order.status !== "pending") throw new ApiError(409, "This payment attempt finished. Refresh to see its current status.");
@@ -149,7 +148,7 @@ export async function reconcileOrder(orderId, client) {
     if (refundedMinor < (order.refundedMinor || 0)) throw new ApiError(503, "Refund details are temporarily incomplete. Retry shortly.");
     const saved = await Model.findOneAndUpdate({ _id: order._id, reconciliationToken: token }, { $set: { status, active: status === "pending", refundedMinor, ...(payment ? { razorpayPaymentId: payment.id } : {}), ...(status === "paid" && !order.paidAt ? { paidAt: new Date() } : {}) } }, { new: true }).select(ORDER_FIELDS);
     if (!saved) throw new ApiError(503, "Payment status changed. Retry shortly.");
-    await fulfillPublicPurchase(saved);
+    await fulfillPurchase(saved);
     return saved;
   } finally {
     await Model.updateOne({ _id: order._id, reconciliationToken: token }, { $unset: { reconciliationToken: 1, reconciliationLeaseUntil: 1 } });
