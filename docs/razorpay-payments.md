@@ -22,12 +22,14 @@ The webhook secret is an independently generated random value of at least 16 cha
 
 1. Use **Live mode** for the live deployment. Confirm the activated account's website domain and enable **automatic capture** in payment capture settings. This integration grants access only after capture; it does not issue capture API calls.
 2. Open **Account & Settings → Webhooks → Add new webhook**.
-3. URL: `https://praneet-vidyapeeth.online/api/payments/razorpay/webhook`.
+3. Recommended URL: `https://learn-loop-backend-qkq5.onrender.com/api/payments/razorpay/webhook`. This is the platform’s Render API; using it avoids browser checks on the frontend domain.
 4. Secret: the same value configured as `RAZORPAY_WEBHOOK_SECRET` in Render.
 5. Alert email: an address the operator monitors for delivery failures.
 6. Select exactly `payment.captured`, `order.paid`, `payment.failed`, `refund.processed`.
 7. After deployment, open the webhook URL in a browser. Its safe readiness response should show `provider: razorpay`, `mode: live`, `configured: true`. This confirms deployment and configuration syntax, not credential validity or dashboard delivery.
 8. Create/enable the webhook. Do not create a Payment Page for this flow: students purchase through the platform's course page and Razorpay Standard Checkout.
+
+Deployment check on 2026-10-12: the direct Render endpoint reports `mode: live`, `configured: true`, and rejects unsigned/invalid-signature POSTs with HTTP 400. The custom-domain endpoint is reachable with a browser user agent, but automated GET/POST requests returned HTTP 403 with Cloudflare error 1010. Use the direct Render URL for webhook delivery. The custom-domain URL can be used later after the operator exempts that exact webhook path from the relevant Cloudflare browser check and verifies a real dashboard delivery; do not disable protection across the entire site.
 
 Use test keys and a separately configured Test-mode webhook to exercise the account without real charges. After switching to Live, the operator should deliberately make a purchase using a separate student account and confirm the Razorpay payment is **captured**, webhook delivery returns **2xx**, the payment record is **paid**, and enrollment/lesson access persists after reload. A simulated webhook or local fixture does not establish live account readiness.
 
@@ -54,4 +56,4 @@ Refund events synchronize payments; chargebacks/disputes, reconciliation jobs fo
 
 The paired frontend has checkout unit tests and `tests/payments_browser.py`, which forwards real UI requests to this API and disposable MongoDB while replacing only Razorpay provider calls and checkout SDK. No automated test reads live credentials or performs a real charge/refund/payout.
 
-References: [Standard Checkout integration](https://razorpay.com/docs/payments/payment-gateway/web-integration/standard/integration-steps/), [webhook setup](https://razorpay.com/docs/webhooks/setup-edit-payments/), [webhook signature validation](https://razorpay.com/docs/webhooks/validate-test/), [payment events](https://razorpay.com/docs/webhooks/payments/), [refund events](https://razorpay.com/docs/webhooks/refunds/), [order recovery by receipt](https://razorpay.com/docs/api/orders/fetch-all/).
+References: [Standard Checkout integration](https://razorpay.com/docs/payments/payment-gateway/web-integration/standard/integration-steps/), [webhook setup](https://razorpay.com/docs/webhooks/setup-edit-payments/), [webhook signature validation](https://razorpay.com/docs/webhooks/validate-test/), [payment events](https://razorpay.com/docs/webhooks/payments/), [refund events](https://razorpay.com/docs/webhooks/refunds/), [order recovery by receipt](https://razorpay.com/docs/api/orders/fetch-all/), [Cloudflare error 1010](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/).
