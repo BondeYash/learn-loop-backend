@@ -5,7 +5,7 @@ import Category from "../models/Category.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import ApiError from "../utils/ApiError.js";
 import asyncHandler from "../utils/asyncHandler.js";
-import { catalogCourseFilter, publicCourseFilter, publicCourseSelection, findPublicCourse, publicCourseCard, courseCatalogAvailability, publicOutline, selectedPublicPreview, safePublicUrl } from "../services/publicCatalog.js";
+import { catalogCourseFilter, publicCourseFilter, publicCourseSelection, findPublicCourse, publicCourseCard, courseCatalogAvailability, courseCatalogAvailabilities, publicOutline, selectedPublicPreview, safePublicUrl } from "../services/publicCatalog.js";
 import { directVideoStore } from "../services/directVideoStore.js";
 import { courseThumbnailStore } from "../services/courseThumbnailStore.js";
 
@@ -15,8 +15,8 @@ export const listPublicCourses = asyncHandler(async (req, res) => {
   const filter = { ...catalogCourseFilter, ...(category ? { category } : {}) };
   if (q.trim()) { const pattern = q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); filter.$or = ["title", "examName", "summary"].map((field) => ({ [field]: { $regex: pattern, $options: "i" } })); }
   const [courses, total, categoryIds] = await Promise.all([Course.find(filter).select(publicCourseSelection).populate("category", "name slug").sort({ publishedAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit), Course.countDocuments(filter), Course.distinct("category", catalogCourseFilter)]);
-  const categories = await Category.find({ _id: { $in: categoryIds } }).select("name slug").sort("name").lean();
-  const cards = await Promise.all(courses.map(async (course) => publicCourseCard(course, await courseCatalogAvailability(course))));
+  const [categories, availability] = await Promise.all([Category.find({ _id: { $in: categoryIds } }).select("name slug").sort("name").lean(), courseCatalogAvailabilities(courses)]);
+  const cards = courses.map(course => publicCourseCard(course, availability.get(String(course._id))));
   return new ApiResponse(res, 200, "Public courses", { courses: cards, total, page, limit, categories: categories.map((item) => ({ id: String(item._id), name: item.name, slug: item.slug })) });
 });
 export const getPublicCourse = asyncHandler(async (req, res) => {

@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import Course from "../models/Course.js";
 import Lesson from "../models/Lesson.js";
 import Module from "../models/Module.js";
+import CourseNote from "../models/CourseNote.js";
 import ApiError from "../utils/ApiError.js";
 import { rupeesToMinor } from "./coursePricing.js";
 import { ensureCourseReady } from "./courseReadiness.js";
@@ -36,6 +37,22 @@ export async function courseCatalogAvailability(course) {
   try { await ensureCourseReady(course._id); }
   catch (error) { if (error.statusCode !== 409) throw error; ready = false; }
   return { enrollment: course.price > 0 ? "purchase" : course.visibility === "public" ? "public" : "assignment", ready };
+}
+export async function courseCatalogAvailabilities(courses) {
+  if (!courses.length) return new Map();
+  const ids = courses.map(course => course._id);
+  // A list needs readiness metadata, not the contents of every text lesson.
+  // Read all courses together instead of issuing readiness queries per card.
+  const [lessons, noteCourses] = await Promise.all([
+    Lesson.find({ course: { $in: ids } }).select("course contentType video").populate("video", "status").lean(),
+    CourseNote.distinct("course", { course: { $in: ids }, status: "ready" }),
+  ]);
+  const populated = new Set(noteCourses.map(String)), blocked = new Set();
+  for (const lesson of lessons) {
+    populated.add(String(lesson.course));
+    if (lesson.contentType === "video" && lesson.video?.status !== "ready") blocked.add(String(lesson.course));
+  }
+  return new Map(courses.map(course => [String(course._id), { enrollment: course.price > 0 ? "purchase" : course.visibility === "public" ? "public" : "assignment", ready: populated.has(String(course._id)) && !blocked.has(String(course._id)) }]));
 }
 export function publicCourseCard(course, availability) {
   // Explicit DTO: account/profile fields, private object keys and unpublished

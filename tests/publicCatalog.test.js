@@ -11,6 +11,8 @@ import Category from "../models/Category.js";
 import Module from "../models/Module.js";
 import Lesson from "../models/Lesson.js";
 import VideoAsset from "../models/VideoAsset.js";
+import CourseNote from "../models/CourseNote.js";
+import { courseCatalogAvailabilities } from "../services/publicCatalog.js";
 
 test("anonymous discovery and selected samples stay separate from private learning (isolated MongoDB + HTTP, storage mocked)", { timeout: 60000 }, async (t) => {
   process.env.NODE_ENV = "test";
@@ -127,6 +129,23 @@ test("anonymous discovery and selected samples stay separate from private learni
       await call(`/courses/${course._id}`, users.owner.cookie, "PATCH", { previewLesson: null }); assert.equal((await call(endpoint + "/preview")).status, 404);
       await call(`/courses/${course._id}`, users.owner.cookie, "PATCH", { previewLesson: text._id });
       assert.equal((await call(`/courses/${course._id}/lessons/${text._id}`, users.owner.cookie, "DELETE")).status, 200); assert.equal((await Course.findById(course._id)).previewLesson, null);
+    });
+    await t.test("batch catalog readiness preserves text, PDF, missing-video and empty course behavior", async () => {
+      const courses = await Promise.all(["Text", "PDF", "Unfinished video", "Empty"].map(title => makeCourse(`Batch ${title}`, { isPublished: true, visibility: "public", price: 199 })));
+      try {
+        const modules = await Promise.all(courses.map(c => Module.create({ course: c._id, title: "Module", order: 0 })));
+        await Lesson.create({ course: courses[0]._id, module: modules[0]._id, title: "Text", contentType: "text", content: "PRIVATE_BULKY_TEXT_".repeat(2000), order: 0 });
+        await Lesson.create({ course: courses[2]._id, module: modules[2]._id, title: "Missing upload", contentType: "video", order: 0 });
+        for (const c of courses.slice(1, 3)) await CourseNote.create({ course: c._id, owner: users.owner.id, slot: 0, uploadId: crypto.randomUUID(), filename: "notes.pdf", size: 100, sha256: "synthetic", status: "ready" });
+        const readiness = await courseCatalogAvailabilities(courses);
+        assert.deepEqual(courses.map(c => readiness.get(String(c._id)).ready), [true, true, false, false]);
+        const list = await call("/public/courses?q=Batch"); assert.equal(list.status, 200); assert.equal(list.body.data.total, 4);
+        assert.equal(JSON.stringify(list.body).includes("PRIVATE_BULKY_TEXT"), false);
+        for (const card of list.body.data.courses) { assert.equal(card.amountMinor, 19900); assert.deepEqual(card.availability, readiness.get(card.id)); }
+      } finally {
+        const ids = courses.map(c => c._id);
+        await Promise.all([Course.deleteMany({ _id: { $in: ids } }), Module.deleteMany({ course: { $in: ids } }), Lesson.deleteMany({ course: { $in: ids } }), CourseNote.deleteMany({ course: { $in: ids } })]);
+      }
     });
   } finally { await new Promise((resolve) => server.close(resolve)); assert.match(mongoose.connection.name, /^lms_test_/); await mongoose.connection.dropDatabase(); await mongoose.disconnect(); delete app.locals.directVideoStore; delete app.locals.courseThumbnailStore; }
 });
