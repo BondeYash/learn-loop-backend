@@ -1,7 +1,7 @@
 import { DoubtSettings, DoubtUsage } from "../models/DoubtDost.js";
 import ApiError from "../utils/ApiError.js";
-export const DEFAULT_DOUBT_MODEL = "gemini-3.1-flash-lite";
-export const modelName = () => process.env.DOUBT_DOST_MODEL || DEFAULT_DOUBT_MODEL;
+export const DEFAULT_DOUBT_MODEL = "openai/gpt-oss-20b";
+export const modelName = () => process.env.GROQ_MODEL || DEFAULT_DOUBT_MODEL;
 const indiaDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 export const monthKey = () => `month:${indiaDate().slice(0, 7)}`;
 export const dayKey = (user) => `day:${indiaDate()}:${user}`;

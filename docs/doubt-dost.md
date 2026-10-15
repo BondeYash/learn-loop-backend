@@ -1,52 +1,47 @@
-# Doubt Dost
+# Doubt Dost: Groq + local PDF retrieval
 
-Doubt Dost answers course questions using an admin-managed PDF knowledge base. It uses Gemini File Search with `gemini-3.1-flash-lite`, private R2 originals, and MongoDB for documents, job leases, allowances and chat history. No vector database or additional npm dependency is required.
+Doubt Dost uses Groq's `openai/gpt-oss-20b` model, private R2 originals and searchable text passages stored in MongoDB. Gemini is no longer called for indexing, answers or cleanup. There is no paid fallback or separate vector database.
 
-## Deployment and first use
+## Deploy
 
-1. Set `GEMINI_API_KEY` privately in the Render backend and redeploy. Never put it in frontend variables, source control or a URL. `DOUBT_DOST_MODEL` is optional; an override must support File Search.
-2. Retain the existing MongoDB and private R2 configuration. The backend credential needs read, write and delete access for `knowledge/<course>/<document>.pdf` in the existing private bucket. Keep public bucket access disabled and exclude this prefix from temporary-upload lifecycle expiry.
-3. Sign in as admin and open `/admin/doubt-dost` on the frontend. Select a course, upload PDFs, wait for “Indexed draft”, and test a question in the preview. Then choose “Publish to Doubt Dost”. Indexing does not publish a file automatically.
-4. An entitled student opens their course and chooses “Meet Doubt Dost”. Paid enrollment and instructor-granted payment waivers use the existing course access rules. An unpaid assignment alone does not grant access.
+1. Add `GROQ_API_KEY` to the Render backend and redeploy. Keep the Groq account on its Free plan. Never put the key in frontend variables, source control or a URL. Optional `GROQ_MODEL` supports `openai/gpt-oss-20b` (default), `openai/gpt-oss-120b` or `qwen/qwen3.8-27b`. The old `DOUBT_DOST_MODEL` setting is ignored.
+2. Keep MongoDB and private R2 read/write/delete configuration. Exclude `knowledge/` originals from temporary-upload expiry. Node 22.13+ is required.
+3. Existing ready PDFs are automatically indexed from their saved originals. Their publication flag and timestamp are preserved. During this one-time preparation, students see a preparation notice and open chats automatically recheck availability. No re-upload or re-publication is required for a successfully migrated PDF.
+4. In Admin → Doubt Dost, select the exact course, upload text-based PDFs, wait for Indexed draft, preview a known question and publish approved material. Publication persists across sign-ins and restarts until explicitly unpublished/removed. The frontend asks for confirmation before unpublishing.
+5. Verify a known question and its cited page using an entitled student account.
 
-The knowledge base is separate from course handouts; existing course PDFs and videos are not automatically sent to Google. Multiple PDFs can be selected; uploads run sequentially. Each PDF must be unencrypted, structurally valid, at most 10 MB and 500 pages, and contain no scripts or embedded files. The default is 100 PDFs per course, adjustable to 1,000. Pagination keeps large libraries manageable.
+An old `GEMINI_API_KEY` is unused. Old Google File Search copies are **not automatically deleted** by this migration: after verifying Groq, delete the old stores through Google/provider administration if no longer needed. Legacy store identifiers remain in MongoDB for that cleanup; removing a document from the new app removes its R2 original and local passages, not its historical Google copy.
 
-Only publish material approved for student access. Entitled students can open the original cited PDF using a five-minute signed link. A previously issued signed URL remains usable until expiry. Google processes the indexed files, questions and recent conversation context; use a billing-enabled project for proprietary material and review the provider's data terms. This deployment is intended for the adult users specified for the platform.
+## PDFs and retrieval
 
-## Retrieval and answering
+The knowledge base is separate from course handouts. PDFs must be unencrypted, structurally valid, at most 10 MB and 500 pages, without scripts or embedded files. PDF.js extracts text in a worker thread with a memory limit and 60-second deadline. Page references come from the parser. Text is split into overlapping passages (1,100 characters, 140-character overlap), bounded to 2 million characters / 2,500 passages per file.
 
-Each course has a separate managed File Search store using `gemini-embedding-2`. It supports text and scanned/image material; answer quality still depends on the original PDF. Upload display names and metadata use internal document IDs. Students never supply a store name, document filter or model.
+**Image-only/scanned PDFs need OCR before upload.** Empty extraction fails with a clear message; partially searchable files show how many pages contain text. The app does not invent answers from unreadable pages.
 
-The backend filters retrieval to ready, published documents in that student's course, limits retrieval to six chunks and includes at most three previous grounded turns. Hindi, English and Hinglish are supported. Output is capped at 1,200 tokens. The model is instructed to treat document contents as reference data and to abstain when evidence is insufficient.
+Search uses normalized English/Hindi terms, stop-word filtering and keyword overlap/ranking within the server-authorized course and ready, published documents. Up to four distinct passages are supplied to Groq. A Hindi question or search without a match can use one additional Groq call to generate bilingual search keywords; previous questions help resolve follow-ups. This is lexical retrieval, so unusual wording, spelling and cross-language matches can still be missed. Representative Hindi/Hinglish questions should be previewed.
 
-Answers require provider grounding supports that refer to allowed documents. Missing citations, incomplete output or unauthorized sources produce a localized “ask your instructor” response instead of the generated answer. Page numbers are shown only when the provider supplies a valid page within that PDF. Scanned-image citations can open the source without a text excerpt. This validates source membership, not the correctness of every generated statement; admins should preview representative questions and students should check the material.
+The model returns JSON with an answer and passage citations. The server requires a completed response, known passage IDs and exact quotations from those passages. Invalid quotes, unknown/withdrawn documents, invalid pages or insufficient evidence produce a localized instructor-help response. This validates source membership and quotations, not every generated claim. Students should check citations.
 
-Course access and session validity are checked again after generation. Unpublishing or removing a PDF suppresses affected answers and excerpts in later chat reads. Students see only their own history and can rate answers. “Ask instructor” opens a private question draft for the student to review and explicitly send; it sends nothing automatically.
+Only questions, bounded recent history and selected passages are sent to Groq; full PDFs stay in R2 and extracted passages in MongoDB. Review [Groq's data policy](https://console.groq.com/docs/your-data) for the account in use.
 
-## Cost controls
+## Access and reliability
 
-Defaults are 500 answer requests per calendar month globally, 20 per student per day, 1,000 PDF pages indexed per month and 100 MB of raw PDF storage. Admin previews use the requesting admin's daily allowance and the global monthly allowance. Daily and monthly boundaries use Asia/Kolkata.
+Students must have course material access through payment or an instructor's payment waiver. Unpaid assignment alone does not grant access. Course access and session validity are checked after generation too. History is private to the student and admins, newest 30 turns, with a 90-day MongoDB TTL. Unpublishing/removal suppresses affected answers and source excerpts. Cited original PDFs use five-minute signed URLs.
 
-Counters are reserved atomically in MongoDB, so restarts do not reset them. Answer attempts that reach the allowance reservation count even if Google fails or no grounded answer is returned. There is no automatic generation retry. A repeated request ID replays its recorded result without another generation call; manual retry after a definitive error is a new attempt. One answer per account/course is allowed in flight. A per-account 20-request/minute limiter also applies.
+Generation has a 45-second overall deadline, a 30-second timeout per Groq request and no automatic retry. The browser has an independent 60-second deadline, elapsed feedback and saved-answer recovery keyed to the original request ID. Read-only checks never trigger another AI generation. A lost HTTP response can be recovered from history without sending the question twice. Students retain the question after failures and can retry manually or review/send an instructor question draft.
 
-Indexing pages are charged to the local allowance before uploading to Google. Failed uploads or manual indexing retries can consume additional provider usage; a retry starts another local page reservation when a fresh upload is needed. Identical PDF bytes in one course are deduplicated. Removing a PDF restores storage/document allowances after deletion is confirmed, but does not refund monthly answer/page usage.
+The five-second worker uses persisted leases and resumes after a restart. Sleeping Render instances pause indexing until they wake. Removal hides material immediately, then removes R2 originals and MongoDB passages; storage failures retry after five minutes. Archived courses deny student access while retaining material.
 
-These controls limit counts, not a guaranteed rupee spending cap. Scanned/image indexing and variable input/context sizes affect the bill. Managed retrieval/storage and embedding prices can change. Review the [Gemini pricing page](https://ai.google.dev/gemini-api/docs/pricing), [File Search guide](https://ai.google.dev/gemini-api/docs/file-search), [store API](https://ai.google.dev/api/file-search/file-search-stores) and [Gemini API terms](https://ai.google.dev/gemini-api/terms) before increasing allowances.
+## Free plan and application allowances
 
-The admin “Allow AI answers and new indexing” switch stops new answers and new uploads to the provider. Already accepted indexing operations are still polled and removals continue. PDF intake can remain queued while paused. Removing the API key also prevents provider cleanup; restore the key to finish pending removal.
+The [Groq Free plan limits](https://console.groq.com/docs/rate-limits) currently list 30 requests/minute, 1,000/day and 200,000 tokens/day for GPT-OSS 20B, with additional per-minute token limits. Limits are shared across the organization and can change. A bilingual rewrite may use a second request, and PDF context/history count as input tokens, so 1,000 requests is not a promise of 1,000 student answers. A 429 response shows a clear wait/instructor option; the app never silently upgrades plans.
 
-## Background work and retention
+Application defaults remain 500 answer attempts/month globally, 20/student/day, 1,000 locally indexed pages/month, 100 MB raw PDFs and 100 PDFs/course. Admins can change these under Usage controls. These are separate from Groq quotas and are not a currency cap. Usage persists in MongoDB and day/month boundaries use Asia/Kolkata. Attempts reaching reservation count even if no supported answer is returned. Replaying a request ID does not generate again.
 
-The API starts a five-second background worker with persisted leases. Queued uploads and accepted operations resume after a restart. A single API process is the recommended initial deployment. Render sleeping pauses work until the service wakes; this is not a separate always-on job service. Indexing has a 30-minute processing deadline and a manual retry action. Generic errors hide provider details and credentials.
-
-Removal hides the document immediately and then deletes its provider copy and R2 original. Failed removal stays queued and retries after five minutes. Purging a course deletes chat records and preserves PDF references until cleanup finishes; a removed course's empty provider store is then deleted. Archived courses retain their private material and deny student access.
-
-Chat records have a 90-day MongoDB TTL index; physical deletion is asynchronous. The student API returns the most recent 30 turns. The model sees at most the latest three eligible answered turns. Usage records for days/months expire after 100 days; cumulative storage counters remain until adjusted by cleanup. Backups and provider retention follow their own configured policies.
+Local indexing requires no model request and can finish while the Groq key is missing. Automatic conversion of an already indexed legacy PDF does not charge another local page allowance. Pausing AI answers also pauses new indexing; removal continues. No key is needed for local indexing/removal.
 
 ## Verification
 
-`node --test tests/doubtDost.test.js` uses an isolated disposable database on `TEST_MONGO_PORT` (default 27018). It covers access, PDF drafts/publication, private history, citations, request replay, budgets, revocation during generation, errors and cleanup. It mocks Gemini/R2; no live provider acceptance or answer-quality claim follows from these tests.
+Run `NODE_ENV=test CLIENT_URL=http://127.0.0.1:5186 node --test tests/doubt*.test.js` against a disposable MongoDB on `TEST_MONGO_PORT` (default 27018). Tests cover PDF text extraction, quotas, citations, private history, request replay, publication persistence/migration, access revocation, deadlines and cleanup. Provider responses and R2 are simulated.
 
-`tests/doubtBrowserFixture.js` is a disposable HTTP fixture used by the frontend's `tests/doubt_dost_e2e_browser.py`. The browser test exercises real React, Express and MongoDB with only Gemini/R2 simulated, including PDF upload, preview, publication, student source viewing, Hindi/Hinglish, failures, instructor handoff, mobile layouts and themes.
-
-After deployment, upload one representative real PDF, preview a question with a known answer, inspect its citation, publish it and verify using an entitled student account. Check Render for indexing failures and Google's usage dashboard for billing/model access. A configured key alone does not verify provider acceptance.
+The frontend's `tests/doubt_dost_e2e_browser.py` exercises real React, Express, MongoDB and PDF extraction with synthetic accounts/material and mocked Groq/R2. Its companion chat UI test covers slow responses, lost response recovery, themes and mobile layouts. No automated test spends live AI credits or verifies a production key. After deployment, use admin preview to confirm the configured Groq account/model accepts a real request.

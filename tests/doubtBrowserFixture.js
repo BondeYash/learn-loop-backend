@@ -1,4 +1,4 @@
-// Disposable real-API browser fixture. Only R2 and Gemini are replaced; no
+// Disposable real-API browser fixture. Only R2 and Groq are replaced; no
 // credentials or network requests to production providers are used.
 import crypto from "node:crypto";
 import readline from "node:readline";
@@ -19,21 +19,17 @@ import ApiError from "../utils/ApiError.js";
 
 await mongoose.connect(`mongodb://127.0.0.1:${process.env.TEST_MONGO_PORT || 27018}/lms_doubt_browser_${crypto.randomBytes(6).toString("hex")}`);
 await Promise.all([User, Session, Course, Category, Module, Lesson, Enrollment, AuditEvent, CourseQuestion, ...doubtModels].map(model => model.init()));
-const objects = new Map(), remotes = new Map(), operations = new Map();
+const objects = new Map();
 let answerCount = 0, failNext = false, working = false;
 const storage = { upload: async (doc, bytes) => objects.set(doc.objectKey, bytes), read: async doc => objects.get(doc.objectKey), remove: async doc => objects.delete(doc.objectKey), link: async doc => ({ url: `https://doubt-source.invalid/${doc._id}.pdf`, expiresAt: Date.now() + 300000 }) };
 const provider = {
-  createStore: async course => `fileSearchStores/${course}`,
-  findDocument: async (store, id) => [...remotes.values()].find(doc => doc.name.startsWith(store + "/") && doc.displayName === String(id)),
-  upload: async (store, doc) => { const remote = { name: `${store}/documents/${doc._id}`, displayName: String(doc._id), state: "ACTIVE" }; remotes.set(remote.name, remote); const name = `${store}/upload/operations/${doc._id}`; operations.set(name, remote); return { name, done: false }; },
-  operation: async name => ({ done: true, response: { documentName: operations.get(name).name } }),
-  document: async name => remotes.get(name), removeDocument: async name => remotes.delete(name), removeStore: async () => {},
-  answer: async ({ documents, store, question, language }) => {
+  rewrite: async () => ({ query: "RAM", usage: { inputTokens: 0, outputTokens: 0 } }),
+  answer: async ({ passages, question, language }) => {
     answerCount++;
     if (failNext) { failNext = false; throw new ApiError(503, "Synthetic AI interruption. Your question was not answered."); }
-    if (question.toLowerCase().includes("unknown")) return { candidates: [{ finishReason: "STOP", content: { parts: [{ text: "UNSUPPORTED CONTENT SHOULD NEVER BE SHOWN" }] } }] };
-    const doc = documents[0], text = language === "hi" ? "RAM अस्थायी मेमोरी है। यह इस कोर्स के नोट्स का एक उदाहरण है।" : language === "en" ? "RAM is temporary memory. This explanation comes from the synthetic course notes." : "RAM temporary memory hoti hai. Yeh explanation aapke course ke synthetic notes par based hai.";
-    return { candidates: [{ finishReason: "STOP", content: { parts: [{ text }] }, groundingMetadata: { groundingChunks: [{ retrievedContext: { title: String(doc._id), fileSearchStore: store, pageNumber: 1, text: "RAM stores information temporarily while the computer is working.", customMetadata: [{ key: "document_id", stringValue: String(doc._id) }] } }], groundingSupports: [{ groundingChunkIndices: [0] }] } }], usageMetadata: { promptTokenCount: 500, candidatesTokenCount: 120 } };
+    if (question.toLowerCase().includes("unknown")) return { complete: true, supported: false, answer: "UNSUPPORTED CONTENT SHOULD NEVER BE SHOWN", citations: [], usage: {} };
+    const text = language === "hi" ? "RAM अस्थायी मेमोरी है। यह इस कोर्स के नोट्स का एक उदाहरण है।" : language === "en" ? "RAM is temporary memory. This explanation comes from the synthetic course notes." : "RAM temporary memory hoti hai. Yeh explanation aapke course ke synthetic notes par based hai.";
+    return { complete: true, supported: true, answer: text, citations: [{ id: passages[0].id, quote: passages[0].text }], usage: { inputTokens: 500, outputTokens: 120 } };
   },
 };
 app.locals.doubtStorage = storage; app.locals.doubtProvider = provider;
@@ -50,7 +46,7 @@ await Enrollment.create({ course: course._id, student: users.student.id, assigne
 const server = await new Promise(resolve => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
 const timer = setInterval(async () => {
   if (working) return; working = true;
-  try { await DoubtDocument.updateMany({ status: { $in: ["queued", "indexing", "removing"] }, leaseUntil: null }, { nextAttemptAt: null }); await processDoubtJob({ provider, storage, configured: true }); }
+  try { await DoubtDocument.updateMany({ status: { $in: ["queued", "indexing", "removing"] }, leaseUntil: null }, { nextAttemptAt: null }); await processDoubtJob({ storage }); }
   catch (e) { console.error(e.message); } finally { working = false; }
 }, 120); timer.unref();
 console.log(JSON.stringify({ courseId: String(course._id), apiOrigin: `http://127.0.0.1:${server.address().port}`, users }));

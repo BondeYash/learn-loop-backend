@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import mongoose from "mongoose";
-import { DoubtSettings, DoubtKnowledgeBase, DoubtDocument, DoubtTurn, DoubtUsage, DoubtLock } from "../models/DoubtDost.js";
+import { DoubtSettings, DoubtDocument, DoubtTurn, DoubtUsage, DoubtLock } from "../models/DoubtDost.js";
 import Course from "../models/Course.js";
 import { requireCourseAccess } from "../services/courseAccess.js";
 import { findSession } from "../middleware/auth.js";
@@ -8,13 +8,16 @@ import { validatePdf, safePdfName } from "../services/pdfValidation.js";
 import { doubtSettings, reserveUsage, answerAllowance, monthKey, dayKey, modelName } from "../services/doubtUsage.js";
 import { doubtProvider, providerConfigured, groundedAnswer } from "../services/doubtProvider.js";
 import { doubtStorage } from "../services/doubtStorage.js";
+import { doubtReadiness } from "../services/doubtReadiness.js";
+import { answerWithDeadline } from "../services/doubtAnswerDeadline.js";
+import { SEARCH_VERSION, retrievePassages } from "../services/doubtRetrieval.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
 const storage = req => req.app.locals.doubtStorage || doubtStorage();
 const provider = req => req.app.locals.doubtProvider || doubtProvider();
 const configured = req => Boolean(req.app.locals.doubtProvider) || providerConfigured();
-const docDto = doc => ({ id: doc._id, filename: doc.title || doc.filename, size: doc.size, pages: doc.pages, status: doc.status, published: doc.published, error: doc.error, createdAt: doc.createdAt });
+const docDto = doc => ({ id: doc._id, filename: doc.title || doc.filename, size: doc.size, pages: doc.pages, textPages: doc.textPages, status: doc.status === "ready" && doc.searchVersion !== SEARCH_VERSION ? "indexing" : doc.status, published: doc.published, error: doc.error, createdAt: doc.createdAt });
 const pageOf = req => Math.min(10000, Math.max(1, Number(req.query.page) || 1));
 async function courseFor(req) {
   const course = await Course.findById(req.params.courseId);
@@ -22,15 +25,15 @@ async function courseFor(req) {
   if (course.archivedAt) throw new ApiError(410, "Restore the course before changing its knowledge base.");
   return course;
 }
-const documentsFor = (course, preview) => DoubtDocument.find({ course, status: "ready", ...(preview ? {} : { published: true }) }).select("_id filename title pages providerDocument");
+const documentsFor = (course, preview) => DoubtDocument.find({ course, status: "ready", searchVersion: SEARCH_VERSION, ...(preview ? {} : { published: true }) }).select("_id filename title pages");
 async function turnDto(turn, preview = false, documents = null) {
   const docs = documents || await documentsFor(turn.course, preview), allowed = new Set(docs.map(doc => String(doc._id)));
   const changed = turn.status === "answered" && turn.sources.some(source => !allowed.has(String(source.document)));
-  return { id: turn._id, question: turn.question, answer: changed ? "The source material has changed. Please ask this question again." : turn.answer || "", status: changed ? "unanswered" : turn.status === "pending" && turn.leaseUntil < new Date() ? "failed" : turn.status, language: turn.language, sources: changed ? [] : turn.sources.map(source => ({ documentId: source.document, filename: source.filename, page: source.page, excerpt: source.excerpt })), feedback: turn.feedback, createdAt: turn.createdAt };
+  return { id: turn._id, requestId: turn.requestId, question: turn.question, answer: changed ? "The source material has changed. Please ask this question again." : turn.answer || "", status: changed ? "unanswered" : turn.status === "pending" && turn.leaseUntil < new Date() ? "failed" : turn.status, language: turn.language, sources: changed ? [] : turn.sources.map(source => ({ documentId: source.document, filename: source.filename, page: source.page, excerpt: source.excerpt })), feedback: turn.feedback, createdAt: turn.createdAt };
 }
 export const adminOverview = asyncHandler(async (req, res) => {
   const [settings, usage, stored, courses] = await Promise.all([doubtSettings(), DoubtUsage.findById(monthKey()), DoubtUsage.findById("storage"), Course.find({ archivedAt: null }).select("title").sort("title").limit(1000).lean()]);
-  return new ApiResponse(res, 200, "Doubt Dost workspace", { settings, configured: configured(req), model: modelName(), usage: { answers: usage?.answers || 0, pages: usage?.pages || 0, bytes: stored?.bytes || 0, inputTokens: usage?.inputTokens || 0, outputTokens: usage?.outputTokens || 0 }, courses: courses.map(course => ({ id: course._id, title: course.title })) });
+  return new ApiResponse(res, 200, "Doubt Dost workspace", { settings, configured: configured(req), provider: "Groq", model: modelName(), usage: { answers: usage?.answers || 0, pages: usage?.pages || 0, bytes: stored?.bytes || 0, inputTokens: usage?.inputTokens || 0, outputTokens: usage?.outputTokens || 0 }, courses: courses.map(course => ({ id: course._id, title: course.title })) });
 });
 export const saveSettings = asyncHandler(async (req, res) => {
   const input = req.body, fields = { enabled: input.enabled, updatedBy: req.user._id };
@@ -44,7 +47,7 @@ export const saveSettings = asyncHandler(async (req, res) => {
 });
 export const listDocuments = asyncHandler(async (req, res) => {
   const course = await courseFor(req), page = pageOf(req);
-  const [documents, total, indexedDocuments] = await Promise.all([DoubtDocument.find({ course: course._id }).sort({ createdAt: -1, _id: -1 }).skip((page - 1) * 20).limit(20), DoubtDocument.countDocuments({ course: course._id }), DoubtDocument.countDocuments({ course: course._id, status: "ready" })]);
+  const [documents, total, indexedDocuments] = await Promise.all([DoubtDocument.find({ course: course._id }).sort({ createdAt: -1, _id: -1 }).skip((page - 1) * 20).limit(20), DoubtDocument.countDocuments({ course: course._id }), DoubtDocument.countDocuments({ course: course._id, status: "ready", searchVersion: SEARCH_VERSION })]);
   return new ApiResponse(res, 200, "Knowledge base PDFs", { course: { id: course._id, title: course.title }, documents: documents.map(docDto), total, indexedDocuments, page, limit: 20 });
 });
 export const uploadDocument = asyncHandler(async (req, res) => {
@@ -105,8 +108,10 @@ export const documentLink = asyncHandler(async (req, res) => {
 });
 export const studentChat = asyncHandler(async (req, res) => {
   const course = await requireCourseAccess(req.params.courseId, req.user), settings = await doubtSettings();
-  const [docs, turns, daily] = await Promise.all([documentsFor(course._id, false), DoubtTurn.find({ course: course._id, student: req.user._id }).sort({ createdAt: -1, _id: -1 }).limit(30), DoubtUsage.findById(dayKey(req.user._id))]);
-  return new ApiResponse(res, 200, "Doubt Dost", { course: { id: course._id, title: course.title }, available: settings.enabled && configured(req) && docs.length > 0, dailyRemaining: Math.max(0, settings.dailyAnswers - (daily?.answers || 0)), documents: docs.length, turns: await Promise.all(turns.reverse().map(turn => turnDto(turn, false, docs))) });
+  const [states, turns, daily] = await Promise.all([DoubtDocument.find({ course: course._id }).select("_id filename title pages searchVersion status published").lean(), DoubtTurn.find({ course: course._id, student: req.user._id }).sort({ createdAt: -1, _id: -1 }).limit(30), DoubtUsage.findById(dayKey(req.user._id))]);
+  const docs = states.filter(doc => doc.status === "ready" && doc.searchVersion === SEARCH_VERSION && doc.published);
+  const readiness = doubtReadiness({ enabled: settings.enabled, configured: configured(req), documents: states });
+  return new ApiResponse(res, 200, "Doubt Dost", { course: { id: course._id, title: course.title }, available: readiness.code === "ready", readiness, dailyRemaining: Math.max(0, settings.dailyAnswers - (daily?.answers || 0)), documents: docs.length, turns: await Promise.all(turns.reverse().map(turn => turnDto(turn, false, docs))) });
 });
 export const askDoubt = asyncHandler(async (req, res) => {
   const preview = req.user.role === "admin";
@@ -120,8 +125,8 @@ export const askDoubt = asyncHandler(async (req, res) => {
   }
   const settings = await doubtSettings();
   if (!settings.enabled || !configured(req)) throw new ApiError(503, "Doubt Dost is being prepared. Please ask your instructor for now.");
-  const [documents, kb] = await Promise.all([documentsFor(req.params.courseId, preview), DoubtKnowledgeBase.findOne({ course: req.params.courseId, removing: false })]);
-  if (!documents.length || !kb?.storeName) throw new ApiError(409, "This course's knowledge base is being prepared. Please ask your instructor for now.");
+  const documents = await documentsFor(req.params.courseId, preview);
+  if (!documents.length) throw new ApiError(409, "This course's PDFs are not ready and published yet. Please ask your instructor for now.");
   const lockId = `${req.user._id}:${req.params.courseId}`, leaseUntil = new Date(Date.now() + 90000);
   try { await DoubtLock.findOneAndUpdate({ _id: lockId, leaseUntil: { $lt: new Date() } }, { leaseUntil }, { upsert: true }); }
   catch (e) { if (e.code === 11000) throw new ApiError(409, "An answer is already being prepared. Please wait for it before asking again."); throw e; }
@@ -131,18 +136,28 @@ export const askDoubt = asyncHandler(async (req, res) => {
     const monthly = await answerAllowance(settings, req.user._id);
     const recent = await DoubtTurn.find({ course: req.params.courseId, student: req.user._id, status: "answered", _id: { $ne: turn._id } }).sort({ createdAt: -1 }).limit(3);
     const history = [];
-    for (const item of recent.reverse()) if (item.sources.every(source => documents.some(doc => String(doc._id) === String(source.document)))) history.push({ role: "user", parts: [{ text: item.question }] }, { role: "model", parts: [{ text: item.answer.slice(0, 2500) }] });
-    const result = await provider(req).answer({ store: kb.storeName, documents, question: question.trim(), language, history });
+    for (const item of recent.reverse()) if (item.sources.every(source => documents.some(doc => String(doc._id) === String(source.document)))) history.push({ question: item.question, answer: item.answer.slice(0, 2500) });
+    const ai = provider(req);
+    const result = await answerWithDeadline({ answer: async ({ signal }) => {
+      let passages = await retrievePassages(new mongoose.Types.ObjectId(req.params.courseId), documents, question.trim());
+      let rewriteUsage = { inputTokens: 0, outputTokens: 0 };
+      if (ai.rewrite && (!passages.length || /[\u0900-\u097f]/.test(question))) {
+        const rewrite = await ai.rewrite({ question: question.trim(), history, signal }); rewriteUsage = rewrite.usage;
+        passages = await retrievePassages(new mongoose.Types.ObjectId(req.params.courseId), documents, question.trim() + " " + rewrite.query);
+      }
+      const answer = passages.length ? await ai.answer({ documents, passages, question: question.trim(), language, history, signal }) : { supported: false, complete: true, usage: {} };
+      return { ...answer, passages, usage: { inputTokens: (answer.usage?.inputTokens || 0) + (rewriteUsage?.inputTokens || 0), outputTokens: (answer.usage?.outputTokens || 0) + (rewriteUsage?.outputTokens || 0) } };
+    } }, {});
     const live = await findSession(req);
     if (!live || preview && live.user.role !== "admin") throw new ApiError(401, "Your session has ended. Please sign in again.");
     if (preview) await courseFor(req); else await requireCourseAccess(req.params.courseId, live.user);
-    const current = await documentsFor(req.params.courseId, preview), answer = groundedAnswer(result, current, kb.storeName, language);
-    const inputTokens = Math.max(0, Math.min(2000000, Number(result.usageMetadata?.promptTokenCount) || 0));
-    const outputTokens = Math.max(0, Math.min(2000000, (Number(result.usageMetadata?.candidatesTokenCount) || 0) + (Number(result.usageMetadata?.thoughtsTokenCount) || 0)));
+    const current = await documentsFor(req.params.courseId, preview), answer = groundedAnswer(result, current, result.passages, language);
+    const inputTokens = Math.max(0, Math.min(2000000, Number(result.usage?.inputTokens) || 0));
+    const outputTokens = Math.max(0, Math.min(2000000, Number(result.usage?.outputTokens) || 0));
     await DoubtUsage.updateOne({ _id: monthly }, { $inc: { inputTokens, outputTokens } });
     Object.assign(turn, answer, { inputTokens, outputTokens }); await turn.save();
     return new ApiResponse(res, 201, "Doubt Dost replied", { turn: await turnDto(turn, preview, current) });
-  } catch (e) { if (turn) await DoubtTurn.updateOne({ _id: turn._id }, { status: "failed", answer: "The answer could not be completed. Please try again or ask your instructor.", sources: [] }); throw e; }
+  } catch (e) { if (turn) await DoubtTurn.updateOne({ _id: turn._id }, { status: "failed", answer: e instanceof ApiError && [429, 503, 504].includes(e.statusCode) ? e.message : "The answer could not be completed. Please try again or ask your instructor.", sources: [] }); throw e; }
   finally { await DoubtLock.deleteOne({ _id: lockId, leaseUntil }); }
 });
 export const feedback = asyncHandler(async (req, res) => {

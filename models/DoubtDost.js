@@ -16,6 +16,7 @@ const document = new mongoose.Schema({
   status: { type: String, enum: ["uploading", "queued", "indexing", "ready", "failed", "removing"], default: "uploading" },
   published: { type: Boolean, default: false }, publishedAt: Date, leaseUntil: Date, nextAttemptAt: Date,
   operationName: String, providerDocument: String, indexingCharged: { type: Boolean, default: false }, indexStartedAt: Date, error: String,
+  searchVersion: Number, chunkCount: Number, textPages: Number,
 }, { timestamps: true });
 document.index({ course: 1, uploadId: 1 }, { unique: true });
 document.index({ course: 1, sha256: 1 }, { unique: true });
@@ -23,6 +24,10 @@ document.index({ status: 1, nextAttemptAt: 1, leaseUntil: 1 });
 document.index({ course: 1, createdAt: -1 });
 document.index({ course: 1, status: 1, published: 1 });
 export const DoubtDocument = mongoose.model("DoubtDocument", document);
+const chunk = new mongoose.Schema({ course: oid("Course"), document: oid("DoubtDocument"), position: Number, page: Number, text: String, terms: [String], version: Number });
+chunk.index({ document: 1, position: 1 }, { unique: true });
+chunk.index({ course: 1, terms: 1 });
+export const DoubtChunk = mongoose.model("DoubtChunk", chunk);
 const source = new mongoose.Schema({ document: oid("DoubtDocument"), filename: String, page: Number, excerpt: String }, { _id: false });
 const turn = new mongoose.Schema({
   course: oid("Course"), student: oid("User"), requestId: String, question: String, language: String,
@@ -41,4 +46,4 @@ export const DoubtUsage = mongoose.model("DoubtUsage", usage);
 const lock = new mongoose.Schema({ _id: String, leaseUntil: Date });
 lock.index({ leaseUntil: 1 }, { expireAfterSeconds: 0 });
 export const DoubtLock = mongoose.model("DoubtLock", lock);
-export const doubtModels = [DoubtSettings, DoubtKnowledgeBase, DoubtDocument, DoubtTurn, DoubtUsage, DoubtLock];
+export const doubtModels = [DoubtSettings, DoubtKnowledgeBase, DoubtDocument, DoubtChunk, DoubtTurn, DoubtUsage, DoubtLock];
