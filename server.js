@@ -15,6 +15,8 @@ import { acquisitionModels } from "./models/Acquisition.js";
 import { paymentOrderModel } from "./models/PaymentOrder.js";
 import { razorpayEventModel } from "./models/RazorpayEvent.js";
 import { paymentMode } from "./services/paymentSettings.js";
+import { doubtModels } from "./models/DoubtDost.js";
+import { startDoubtWorker } from "./services/doubtWorker.js";
 
 const PORT = process.env.PORT || 5000;
 
@@ -23,6 +25,7 @@ const startServer = async () => {
   await connectDB();
   await checkObjectStore();
   await CourseNote.init();
+  await Promise.all(doubtModels.map(model => model.init()));
   await Promise.all([Assessment.init(), AssessmentAttempt.init()]);
   await Promise.all([PracticalTask.init(), PracticalRecord.init(), CourseQuestion.init(), Progress.init()]);
   await Promise.all(acquisitionModels.map((model) => model.init()));
@@ -38,8 +41,9 @@ const startServer = async () => {
   const server = app.listen(PORT, () => {
     console.log(`LMS server running in ${process.env.NODE_ENV || "development"} mode on port ${PORT}`);
   });
+  const stopDoubtWorker = startDoubtWorker();
 
-  const shutdown = () => { stopWorker(); server.close(async () => { await mongoose.disconnect(); process.exit(0); }); };
+  const shutdown = () => { stopWorker(); server.close(async () => { await stopDoubtWorker(); await mongoose.disconnect(); process.exit(0); }); };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 

@@ -1,5 +1,7 @@
 # Current frontend hosting
 
+For the course PDF assistant, follow [Doubt Dost setup and usage controls](doubt-dost.md). Its key belongs only in the Render backend.
+
 The frontend now uses Cloudflare Workers Static Assets with a same-origin API proxy, not the earlier Vercel proposal below. Follow the [current frontend deployment instructions](https://github.com/BondeYash/learn-loop-frontend/blob/main/docs/deployment.md). Backend Render/Atlas/private-R2 requirements below remain relevant. For this release, follow [admin setup and safe rollout](admin-rollout.md), including rollback restrictions after archive/suspension.
 
 ## Earlier deployment proposal (historical)

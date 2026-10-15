@@ -21,6 +21,7 @@ import publicCourseRoutes from "./routes/publicCourseRoutes.js";
 import examNotificationRoutes from "./routes/examNotificationRoutes.js";
 import assessmentRoutes from "./routes/assessmentRoutes.js";
 import learningSupportRoutes from "./routes/learningSupportRoutes.js";
+import doubtRoutes from "./routes/doubtRoutes.js";
 import acquisitionRoutes from "./routes/acquisitionRoutes.js";
 import { razorpayWebhook, razorpayWebhookHealth } from "./controllers/paymentController.js";
 
@@ -82,6 +83,7 @@ app.use("/api/public", publicCourseRoutes);
 app.use("/api/public", examNotificationRoutes);
 app.use("/api", assessmentRoutes);
 app.use("/api", learningSupportRoutes);
+app.use("/api", doubtRoutes);
 app.use("/api", videoRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/courses", courseRoutes);

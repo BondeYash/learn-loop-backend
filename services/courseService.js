@@ -13,6 +13,7 @@ import { PracticalTask, PracticalRecord, CourseQuestion } from "../models/Learni
 import { acquisitionModels } from "../models/Acquisition.js";
 import VideoAsset from "../models/VideoAsset.js";
 import { r2Client } from "./videoObjectStore.js";
+import { DoubtDocument, DoubtKnowledgeBase, DoubtTurn } from "../models/DoubtDost.js";
 
 export const requireCourseOwner = async (courseId, user, { allowArchived = false } = {}) => {
   const course = await Course.findById(courseId);
@@ -41,6 +42,10 @@ const storageKey = (bucket, key) => bucket && key ? `${bucket}/${key}` : null;
 export async function purgeCourse(courseId) {
   const course = await Course.findById(courseId).select("+thumbnail.objectKey +thumbnail.storageBucket");
   if (!course) throw new ApiError(404, "Course not found");
+  // Keep private object/provider references until their background removal is
+  // confirmed. Losing the DB record first would strand billable AI documents.
+  await DoubtKnowledgeBase.updateOne({ course: course._id }, { removing: true });
+  await DoubtDocument.updateMany({ course: course._id }, { status: "removing", published: false, nextAttemptAt: null });
   const [notes, videos] = await Promise.all([
     CourseNote.find({ course: course._id }),
     VideoAsset.find({ course: course._id }),
@@ -67,6 +72,7 @@ export async function purgeCourse(courseId) {
     PracticalTask.deleteMany({ course: course._id }),
     PracticalRecord.deleteMany({ course: course._id }),
     CourseQuestion.deleteMany({ course: course._id }),
+    DoubtTurn.deleteMany({ course: course._id }),
     ...acquisitionModels.map((model) => model.deleteMany({ course: course._id })),
     VideoAsset.deleteMany({ course: course._id }),
   ]);
