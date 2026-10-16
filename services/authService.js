@@ -59,13 +59,19 @@ export const requestPasswordReset = async (email) => {
     port: Number(smtpPort) || 587,
     secure: process.env.SMTP_SECURE === "true",
     auth: { user: smtpUser, pass: smtpPass },
+    connectionTimeout: 8000, greetingTimeout: 8000, socketTimeout: 10000,
   });
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || smtpUser,
-    to: user.email,
-    subject: `Reset your ${BRAND_NAME} password`,
-    text: `Reset your ${BRAND_NAME} password using this link: ${resetUrl}\nThis link expires in 10 minutes.`,
-  });
+  let timer;
+  try {
+    await Promise.race([
+      transporter.sendMail({ from: process.env.EMAIL_FROM || smtpUser, to: user.email, subject: `Reset your ${BRAND_NAME} password`, text: `Reset your ${BRAND_NAME} password using this link: ${resetUrl}\nThis link expires in 10 minutes.` }),
+      new Promise((_, reject) => { timer = setTimeout(() => { reject(new Error("Mail delivery timed out")); transporter.close(); }, 12000); }),
+    ]);
+  } catch {
+    // An older failed delivery must not invalidate a newer reset request.
+    await User.updateOne({ _id: user._id, resetPasswordToken: user.resetPasswordToken }, { $unset: { resetPasswordToken: 1, resetPasswordExpires: 1 } });
+    throw new ApiError(503, "Reset email could not be sent. Please try again or contact the administrator.");
+  } finally { clearTimeout(timer); }
   return null;
 };
 

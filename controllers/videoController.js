@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { withUploadCreationLock } from "../services/uploadCreationLock.js";
 import Lesson from "../models/Lesson.js";
 import VideoAsset from "../models/VideoAsset.js";
 import { requireCourseOwner } from "../services/courseService.js";
@@ -25,14 +26,18 @@ export const createUpload = asyncHandler(async (req, res) => {
   const { filename, size, fingerprint } = req.body;
   if (!Number.isSafeInteger(size) || size < 1 || size > maxVideoBytes()) throw new ApiError(400, `Video must be between 1 byte and ${maxVideoBytes()} bytes`);
   if (typeof filename !== "string" || filename.length > 200 || !/\.(mp4|mov|webm)$/i.test(filename) || !/^[a-f0-9]{64}$/.test(fingerprint || "")) throw new ApiError(400, "Select an MP4, MOV, or WebM video");
-  const current = lesson.video && await VideoAsset.findById(lesson.video);
-  if (current && current.fingerprint !== fingerprint) throw new ApiError(409, "Remove the current video before uploading a different file");
-  if (!current && await VideoAsset.countDocuments({ owner: req.user._id, status: { $in: ["uploading", "queued", "processing"] } }) >= 3) throw new ApiError(429, "Finish or remove an existing upload before starting another (maximum 3).");
-  const asset = await VideoAsset.findOneAndUpdate({ lesson: lesson._id, fingerprint }, { $setOnInsert: { owner: req.user._id, course: lesson.course, filename, size, checksumVersion: 1, storageProvider: storageProvider(), storageBucket: storageProvider() === "r2" ? process.env.R2_BUCKET : undefined, chunkSize: CHUNK_SIZE, chunkCount: Math.ceil(size / CHUNK_SIZE), expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) } }, { upsert: true, new: true, setDefaultsOnInsert: true });
-  if (asset.status === "cancelled") throw new ApiError(410, "Upload expired or removed. Select the file again after removing this upload.");
-  const linked = await Lesson.updateOne({ _id: lesson._id, $or: [{ video: null }, { video: asset._id }] }, { video: asset._id });
-  if (!linked.matchedCount) { await VideoAsset.updateOne({ _id: asset._id }, { status: "cancelled" }); throw new ApiError(409, "Another video was attached to this lesson. Refresh the page."); }
-  return new ApiResponse(res, 200, "Upload session ready", { video: publicVideo(asset), uploadedChunks: asset.uploadMode === "direct" ? [] : await listChunks(asset) });
+  return withUploadCreationLock(req.user._id, async () => {
+    const latest = await Lesson.findById(lesson._id).select("video");
+    if (!latest) throw new ApiError(404, "Lesson not found");
+    const current = latest.video && await VideoAsset.findById(latest.video);
+    if (current && current.fingerprint !== fingerprint) throw new ApiError(409, "Remove the current video before uploading a different file");
+    if (!current && await VideoAsset.countDocuments({ owner: req.user._id, status: { $in: ["uploading", "verifying", "queued", "processing"] }, expiresAt: { $gt: new Date() } }) >= 3) throw new ApiError(429, "Finish or remove an existing upload before starting another (maximum 3).");
+    const asset = await VideoAsset.findOneAndUpdate({ lesson: lesson._id, fingerprint }, { $setOnInsert: { owner: req.user._id, course: lesson.course, filename, size, checksumVersion: 1, storageProvider: storageProvider(), storageBucket: storageProvider() === "r2" ? process.env.R2_BUCKET : undefined, chunkSize: CHUNK_SIZE, chunkCount: Math.ceil(size / CHUNK_SIZE), expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) } }, { upsert: true, new: true, setDefaultsOnInsert: true });
+    if (asset.status === "cancelled") throw new ApiError(410, "Upload expired or removed. Select the file again after removing this upload.");
+    const linked = await Lesson.updateOne({ _id: lesson._id, $or: [{ video: null }, { video: asset._id }] }, { video: asset._id });
+    if (!linked.matchedCount) { await VideoAsset.updateOne({ _id: asset._id }, { status: "cancelled" }); throw new ApiError(409, "Another video was attached to this lesson. Refresh the page."); }
+    return new ApiResponse(res, 200, "Upload session ready", { video: publicVideo(asset), uploadedChunks: asset.uploadMode === "direct" ? [] : await listChunks(asset) });
+  });
 });
 export const uploadStatus = asyncHandler(async (req, res) => { const asset = await ownedAsset(req); return new ApiResponse(res, 200, "Upload status", { video: publicVideo(asset), uploadedChunks: asset.uploadMode === "direct" ? [] : await listChunks(asset) }); });
 export const uploadChunk = asyncHandler(async (req, res) => {

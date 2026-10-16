@@ -26,4 +26,5 @@ const schema = new mongoose.Schema({
   expiresAt: { type: Date, required: true },
 }, { timestamps: true });
 schema.index({ lesson: 1, fingerprint: 1 }, { unique: true });
+schema.index({ owner: 1, status: 1 });
 export default mongoose.model("VideoAsset", schema);

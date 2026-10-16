@@ -107,6 +107,13 @@ test("direct upload and signed playback authorization (real MongoDB/HTTP; object
       assert.equal((await call(`/direct-uploads/${nextId}/url`, teacher.cookie, "POST", {})).status, 410);
       assert.equal((await call(`/direct-uploads/${nextId}/complete`, teacher.cookie, "POST", {})).status, 410);
     });
+    await t.test("concurrent direct and legacy tabs share the three-upload quota; expired sessions release capacity", async () => {
+      const extra = await Lesson.create(Array.from({ length: 4 }, (_, index) => ({ course, module, title: `Concurrent ${index}`, contentType: "video", order: 20 + index })));
+      const opened = await Promise.all(extra.map((item, index) => call(`/lessons/${item._id}/${index % 2 ? "uploads" : "direct-uploads"}`, teacher.cookie, "POST", { ...uploadBody, fingerprint: String(index + 1).repeat(64) })));
+      assert.equal(opened.filter(item => item.status === 200).length, 3);
+      assert.equal(opened.filter(item => item.status === 429).length, 1);
+      assert.equal(await VideoAsset.countDocuments({ owner: teacher.body.data.user.id, status: "uploading", expiresAt: { $gt: new Date() } }), 3);
+    });
   } finally {
     await new Promise((resolve) => server.close(resolve));
     assert.match(mongoose.connection.name, /^lms_test_/); await mongoose.connection.dropDatabase(); await mongoose.disconnect(); delete app.locals.directVideoStore;

@@ -4,7 +4,7 @@ import asyncHandler from "../utils/asyncHandler.js";
 import Lesson from "../models/Lesson.js";
 import Enrollment from "../models/Enrollment.js";
 import Progress from "../models/Progress.js";
-import { currentProgress, withCurrentCompletion } from "../services/currentProgress.js";
+import { currentProgress, withCurrentCompletion, learningLessonAvailable } from "../services/currentProgress.js";
 import { hasCourseEnrollment, requireCourseAccess } from "../services/courseAccess.js";
 import { withCoursePayments } from "../services/coursePayments.js";
 import { restorePurchasedEnrollments } from "../services/courseEnrollment.js";
@@ -21,14 +21,21 @@ export const completeLesson = asyncHandler(async (req, res) => {
   const lesson = await Lesson.findById(req.params.id).populate("video", "status");
   if (!lesson) throw new ApiError(404, "Lesson not found");
   await requireCourseAccess(lesson.course, req.user);
-  if (lesson.contentType === "video" && lesson.video?.status !== "ready") throw new ApiError(409, "This video is not ready");
-  const total = await Lesson.countDocuments({ course: lesson.course });
-  const progress = await Progress.findOneAndUpdate({ student: req.user._id, course: lesson.course }, { $addToSet: { completedLessons: lesson._id } }, { new: true, upsert: true, setDefaultsOnInsert: true });
-  const existing = await Lesson.countDocuments({ course: lesson.course, _id: { $in: progress.completedLessons } });
-  progress.percentage = total ? Math.min(100, Math.round(existing / total * 100)) : 0;
-  await progress.save();
+  if (!learningLessonAvailable(lesson)) throw new ApiError(409, "This lesson is not ready");
+  const curriculum = await Lesson.find({ course: lesson.course }).select("_id course contentType").populate("video", "status").lean();
+  const ids = curriculum.filter(learningLessonAvailable).map(item => item._id);
+  const fields = { student: req.user._id, course: lesson.course };
+  // Compute from the current set inside one atomic update. Two tabs completing
+  // different lessons must not replace one another's answers or cached count.
+  const update = [
+    { $set: { ...fields, completedLessons: { $setUnion: [{ $ifNull: ["$completedLessons", []] }, [lesson._id]] } } },
+    { $set: { percentage: ids.length ? { $floor: { $add: [{ $multiply: [{ $divide: [{ $size: { $setIntersection: ["$completedLessons", ids] } }, ids.length] }, 100] }, 0.5] } } : 0 } },
+  ];
+  let progress;
+  try { progress = await Progress.findOneAndUpdate(fields, update, { new: true, upsert: true }); }
+  catch (error) { if (error.code !== 11000) throw error; progress = await Progress.findOneAndUpdate(fields, update, { new: true }); }
   await Enrollment.updateOne({ student: req.user._id, course: lesson.course }, progress.percentage === 100 ? { status: "completed", completedAt: new Date() } : { $set: { status: "active" }, $unset: { completedAt: 1 } });
-  const refreshed = await currentProgress([{ student: req.user._id, course: lesson.course }]);
+  const refreshed = await currentProgress([{ student: req.user._id, course: lesson.course }], curriculum);
   return new ApiResponse(res, 200, "Lesson marked complete", { progress: refreshed.get(`${req.user._id}:${lesson.course}`) });
 });
 export const courseProgress = asyncHandler(async (req, res) => {

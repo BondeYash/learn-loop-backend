@@ -24,6 +24,7 @@ import learningSupportRoutes from "./routes/learningSupportRoutes.js";
 import doubtRoutes from "./routes/doubtRoutes.js";
 import acquisitionRoutes from "./routes/acquisitionRoutes.js";
 import { razorpayWebhook, razorpayWebhookHealth } from "./controllers/paymentController.js";
+import mongoose from "mongoose";
 
 const app = express();
 const clientOrigin = process.env.CLIENT_URL || "http://localhost:5173";
@@ -56,6 +57,15 @@ app.use("/api", (req, res, next) => {
 // cookie/session parsing and sanitizers, and authenticates with the signature.
 app.get("/api/payments/razorpay/webhook", razorpayWebhookHealth);
 app.post("/api/payments/razorpay/webhook", express.raw({ type: "application/json", limit: "256kb" }), razorpayWebhook);
+// Health checks stay independent of sessions and database buffering. Monitoring
+// must still get a prompt response when MongoDB is disconnected.
+const healthData = () => ({ timestamp: new Date().toISOString(), databaseReady: mongoose.connection.readyState === 1,
+  ...(/^[a-f0-9]{7,40}$/i.test(process.env.RENDER_GIT_COMMIT || "") ? { commit: process.env.RENDER_GIT_COMMIT.slice(0, 7) } : {}) });
+app.get("/api/health", (req, res) => res.status(200).json({ success: true, message: "LMS API is running", data: healthData() }));
+app.get("/api/ready", (req, res) => {
+  const data = healthData();
+  res.status(data.databaseReady ? 200 : 503).json({ success: data.databaseReady, message: data.databaseReady ? "LMS API is ready" : "The database is reconnecting. Please retry shortly.", data });
+});
 // ---- Body parsing & logging ----
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
@@ -68,11 +78,6 @@ app.use(xss());
 if (process.env.NODE_ENV === "development") {
   app.use(morgan("dev"));
 }
-
-// ---- Health check ----
-app.get("/api/health", (req, res) => {
-  res.status(200).json({ success: true, message: "LMS API is running", data: { timestamp: new Date().toISOString() } });
-});
 
 // ---- API routes ----
 app.use("/api", auditAdminMutations);

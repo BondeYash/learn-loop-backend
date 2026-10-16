@@ -34,6 +34,8 @@ const courseSchema = new mongoose.Schema({
   averageRating: { type: Number, default: 0, min: 0, max: 5 },
   ratingCount: { type: Number, default: 0, min: 0 },
 }, { timestamps: true });
+courseSchema.index({ archivedAt: 1, isPublished: 1, publishedAt: -1, _id: -1 });
+courseSchema.index({ instructor: 1, archivedAt: 1, updatedAt: -1, _id: -1 });
 
 courseSchema.pre("validate", function setSlug(next) {
   if (this.isModified("title")) this.slug = slugify(`${this.title}-${this._id}`, { lower: true, strict: true });

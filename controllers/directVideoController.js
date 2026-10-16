@@ -10,6 +10,7 @@ import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { publicVideo } from "./videoController.js";
+import { withUploadCreationLock } from "../services/uploadCreationLock.js";
 const store = (req) => req.app.locals.directVideoStore || directVideoStore();
 async function owned(req) {
   const asset = await VideoAsset.findById(req.params.id);
@@ -31,15 +32,19 @@ export const createDirectUpload = asyncHandler(async (req, res) => {
   if (typeof filename !== "string" || filename.length > 200 || !/\.mp4$/i.test(filename) || !/^[a-f0-9]{64}$/.test(fingerprint || "")) throw new ApiError(400, "Upload a browser-compatible H.264/AAC MP4. Convert WebM or MOV before uploading.");
   if (!Number.isSafeInteger(size) || size < 16 || size > maxVideoBytes()) throw new ApiError(400, "Choose an MP4 up to 2 GB.");
   if (!Number.isFinite(duration) || duration <= 0 || duration > 14400 || !Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 8192 || height > 8192) throw new ApiError(400, "The browser must confirm a playable video up to four hours before upload.");
-  const current = lesson.video && await VideoAsset.findById(lesson.video);
-  if (current && (current.fingerprint !== fingerprint || current.uploadMode !== "direct")) throw new ApiError(409, "Remove the current video before selecting a different MP4.");
-  if (!current && await VideoAsset.countDocuments({ owner: req.user._id, status: { $in: ["uploading", "verifying", "queued", "processing"] } }) >= 3) throw new ApiError(429, "Finish or remove an existing upload first (maximum three unfinished uploads).");
-  const id = new mongoose.Types.ObjectId();
-  const asset = await VideoAsset.findOneAndUpdate({ lesson: lesson._id, fingerprint }, { $setOnInsert: { _id: id, owner: req.user._id, course: lesson.course, filename, size, duration, width, height, uploadMode: "direct", storageProvider: "r2", storageBucket: process.env.R2_BUCKET, uploadKey: `incoming/${id}/${crypto.randomUUID()}.mp4`, chunkSize: 0, chunkCount: 0, expiresAt: new Date(Date.now() + 86400000) } }, { upsert: true, new: true, setDefaultsOnInsert: true });
-  if (asset.status !== "ready") active(asset);
-  const linked = await Lesson.updateOne({ _id: lesson._id, $or: [{ video: null }, { video: asset._id }] }, { video: asset._id });
-  if (!linked.matchedCount) { await VideoAsset.updateOne({ _id: asset._id }, { status: "cancelled" }); throw new ApiError(409, "Another video was attached. Refresh this lesson."); }
-  return new ApiResponse(res, 200, "Direct upload session ready", { video: publicVideo(asset) });
+  return withUploadCreationLock(req.user._id, async () => {
+    const latest = await Lesson.findById(lesson._id).select("video");
+    if (!latest) throw new ApiError(404, "Lesson not found");
+    const current = latest.video && await VideoAsset.findById(latest.video);
+    if (current && (current.fingerprint !== fingerprint || current.uploadMode !== "direct")) throw new ApiError(409, "Remove the current video before selecting a different MP4.");
+    if (!current && await VideoAsset.countDocuments({ owner: req.user._id, status: { $in: ["uploading", "verifying", "queued", "processing"] }, expiresAt: { $gt: new Date() } }) >= 3) throw new ApiError(429, "Finish or remove an existing upload first (maximum three unfinished uploads).");
+    const id = new mongoose.Types.ObjectId();
+    const asset = await VideoAsset.findOneAndUpdate({ lesson: lesson._id, fingerprint }, { $setOnInsert: { _id: id, owner: req.user._id, course: lesson.course, filename, size, duration, width, height, uploadMode: "direct", storageProvider: "r2", storageBucket: process.env.R2_BUCKET, uploadKey: `incoming/${id}/${crypto.randomUUID()}.mp4`, chunkSize: 0, chunkCount: 0, expiresAt: new Date(Date.now() + 86400000) } }, { upsert: true, new: true, setDefaultsOnInsert: true });
+    if (asset.status !== "ready") active(asset);
+    const linked = await Lesson.updateOne({ _id: lesson._id, $or: [{ video: null }, { video: asset._id }] }, { video: asset._id });
+    if (!linked.matchedCount) { await VideoAsset.updateOne({ _id: asset._id }, { status: "cancelled" }); throw new ApiError(409, "Another video was attached. Refresh this lesson."); }
+    return new ApiResponse(res, 200, "Direct upload session ready", { video: publicVideo(asset) });
+  });
 });
 export const directUploadTicket = asyncHandler(async (req, res) => {
   const asset = await owned(req); active(asset);

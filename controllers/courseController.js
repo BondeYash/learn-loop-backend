@@ -12,7 +12,7 @@ import { ensureCourseReady } from "../services/courseReadiness.js";
 import { archiveCourse, restoreCourse, courseCurriculum, ensureCategory, requireCourseOwner } from "../services/courseService.js";
 import { withCoursePayments } from "../services/coursePayments.js";
 import { publicCourseFields, validatePublicCourseChanges } from "../services/publicCatalog.js";
-import { currentProgress } from "../services/currentProgress.js";
+import { currentProgress, learningLessonAvailable } from "../services/currentProgress.js";
 import { restorePurchasedEnrollments } from "../services/courseEnrollment.js";
 
 const allowedFields = ["title", "description", "category", "price", "level", "language", "requirements", "learningOutcomes", ...publicCourseFields];
@@ -27,15 +27,17 @@ export const listCourses = asyncHandler(async (req, res) => {
     filter = { isPublished: true };
   }
   filter.archivedAt = null;
+  if (req.user.role === "student" && req.query.enrolled === "true") filter._id = { $in: assignments.map(item => item.course) };
   const courses = await Course.find(filter).populate("instructor", "name avatar").populate("category", "name slug").sort("-publishedAt");
   if (req.user.role !== "student") return new ApiResponse(res, 200, "Courses retrieved", { courses });
   const assigned = new Map(assignments.map((item) => [String(item.course), item]));
   const withPayments = await withCoursePayments(courses, req.user._id);
   const progress = await currentProgress(assignments);
-  return new ApiResponse(res, 200, "Courses retrieved", { courses: withPayments.map((course) => {
+  const summaries = withPayments.map((course) => {
     const enrollment = assigned.get(String(course._id)), enrolled = hasCourseEnrollment(course, enrollment), saved = progress.get(`${req.user._id}:${course._id}`), videos = enrolled && !course.payment.required, status = enrolled ? saved?.percentage === 100 ? "completed" : "active" : null;
     return { ...course, access: { assigned: Boolean(enrollment?.assignedBy), enrolled, videos, status }, ...(videos && saved ? { progress: { completedCount: saved.completedCount, totalLessons: saved.totalLessons, percentage: saved.percentage, resume: saved.resume } } : {}) };
-  }) });
+  });
+  return new ApiResponse(res, 200, "Courses retrieved", { courses: req.query.enrolled === "true" ? summaries.filter(course => course.access.videos) : summaries });
 });
 export const getCourse = asyncHandler(async (req, res) => {
   const identifiers = [{ slug: req.params.id }];
@@ -53,8 +55,9 @@ export const getCourse = asyncHandler(async (req, res) => {
   }
   await requireCourseAccess(course._id, req.user);
   const modules = await courseCurriculum(course._id);
-  for (const module of modules) module.lessons = module.lessons.filter((lesson) => lesson.contentType === "text" || lesson.video?.status === "ready");
-  return new ApiResponse(res, 200, "Course retrieved", { course, modules, access: { assigned: Boolean(enrollment.assignedBy), enrolled: true, videos: true } });
+  for (const module of modules) module.lessons = module.lessons.filter(learningLessonAvailable);
+  const progress = await currentProgress([{ student: req.user._id, course: course._id }], modules.flatMap(module => module.lessons));
+  return new ApiResponse(res, 200, "Course retrieved", { course, modules, progress: progress.get(`${req.user._id}:${course._id}`), access: { assigned: Boolean(enrollment.assignedBy), enrolled: true, videos: true } });
 });
 export const myCourses = asyncHandler(async (req, res) => {
   const filter = { ...(req.user.role === "admin" ? {} : { instructor: req.user._id }), archivedAt: req.query.archived === "true" ? { $ne: null } : null };

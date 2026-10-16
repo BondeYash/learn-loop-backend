@@ -19,7 +19,7 @@ export const registerValidator = [
   body("role").optional().equals("student").withMessage("Instructor accounts must be created by an administrator"),
   validate,
 ];
-export const loginValidator = [email, body("password").notEmpty().withMessage("Password is required"), validate];
+export const loginValidator = [email, body("password").custom(value => typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= 72).withMessage("Enter a password of up to 72 UTF-8 bytes"), validate];
 export const forgotPasswordValidator = [email, validate];
 export const resetPasswordValidator = [password, validate];
 export const changePasswordValidator = [body("currentPassword").isString().isLength({ min: 1, max: 72 }), passwordRule("password", 12), validate];

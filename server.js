@@ -17,6 +17,7 @@ import { razorpayEventModel } from "./models/RazorpayEvent.js";
 import { paymentMode } from "./services/paymentSettings.js";
 import { doubtModels } from "./models/DoubtDost.js";
 import { startDoubtWorker } from "./services/doubtWorker.js";
+import { UploadCreationLock } from "./services/uploadCreationLock.js";
 
 const PORT = process.env.PORT || 5000;
 
@@ -25,6 +26,7 @@ const startServer = async () => {
   await connectDB();
   await checkObjectStore();
   await CourseNote.init();
+  await UploadCreationLock.init();
   await Promise.all(doubtModels.map(model => model.init()));
   await Promise.all([Assessment.init(), AssessmentAttempt.init()]);
   await Promise.all([PracticalTask.init(), PracticalRecord.init(), CourseQuestion.init(), Progress.init()]);
